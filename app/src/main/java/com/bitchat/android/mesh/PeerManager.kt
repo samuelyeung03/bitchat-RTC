@@ -67,11 +67,10 @@ class PeerManager {
     
     companion object {
         private const val TAG = "PeerManager"
-        private const val CLEANUP_INTERVAL = 60000L // 1 minute
     }
 
     // Centralized timeout from AppConstants
-    private val stalePeerTimeoutMs: Long = com.bitchat.android.util.AppConstants.STALE_PEER_TIMEOUT_MS
+    private val stalePeerTimeoutMs: Long = com.bitchat.android.util.AppConstants.Mesh.STALE_PEER_TIMEOUT_MS
     
     // Peer tracking data - enhanced with verification status
     private val peers = ConcurrentHashMap<String, PeerInfo>() // peerID -> PeerInfo
@@ -416,7 +415,7 @@ class PeerManager {
     private fun startPeriodicCleanup() {
         managerScope.launch {
             while (isActive) {
-                delay(CLEANUP_INTERVAL)
+                delay(com.bitchat.android.util.AppConstants.Mesh.PEER_CLEANUP_INTERVAL_MS)
                 cleanupStalePeers()
             }
         }
