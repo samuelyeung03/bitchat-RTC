@@ -147,6 +147,8 @@ class ChatViewModel(
                 mediaSendingManager.handleTransferProgressEvent(evt)
             }
         }
+        
+        // Removed background location notes subscription. Notes now load only when sheet opens.
     }
 
     fun cancelMediaSend(messageId: String) {
@@ -590,6 +592,8 @@ class ChatViewModel(
             }
         }
     }
+    
+    // Location notes subscription management moved to LocationNotesViewModelExtensions.kt
     
     /**
      * Update reactive states for all connected peers (session states, fingerprints, nicknames, RSSI)

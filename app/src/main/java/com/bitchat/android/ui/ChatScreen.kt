@@ -63,6 +63,7 @@ fun ChatScreen(viewModel: ChatViewModel) {
     var showPasswordDialog by remember { mutableStateOf(false) }
     var passwordInput by remember { mutableStateOf("") }
     var showLocationChannelsSheet by remember { mutableStateOf(false) }
+    var showLocationNotesSheet by remember { mutableStateOf(false) }
     var showUserSheet by remember { mutableStateOf(false) }
     var selectedUserForSheet by remember { mutableStateOf("") }
     var selectedMessageForSheet by remember { mutableStateOf<BitchatMessage?>(null) }
@@ -241,7 +242,8 @@ fun ChatScreen(viewModel: ChatViewModel) {
             onSidebarToggle = { viewModel.showSidebar() },
             onShowAppInfo = { viewModel.showAppInfo() },
             onPanicClear = { viewModel.panicClearAllData() },
-            onLocationChannelsClick = { showLocationChannelsSheet = true }
+            onLocationChannelsClick = { showLocationChannelsSheet = true },
+            onLocationNotesClick = { showLocationNotesSheet = true }
         )
 
         // Divider under header - positioned after status bar + header height
@@ -354,6 +356,8 @@ fun ChatScreen(viewModel: ChatViewModel) {
         onAppInfoDismiss = { viewModel.hideAppInfo() },
         showLocationChannelsSheet = showLocationChannelsSheet,
         onLocationChannelsSheetDismiss = { showLocationChannelsSheet = false },
+        showLocationNotesSheet = showLocationNotesSheet,
+        onLocationNotesSheetDismiss = { showLocationNotesSheet = false },
         showUserSheet = showUserSheet,
         onUserSheetDismiss = { 
             showUserSheet = false
@@ -435,8 +439,12 @@ private fun ChatFloatingHeader(
     onSidebarToggle: () -> Unit,
     onShowAppInfo: () -> Unit,
     onPanicClear: () -> Unit,
-    onLocationChannelsClick: () -> Unit
+    onLocationChannelsClick: () -> Unit,
+    onLocationNotesClick: () -> Unit
 ) {
+    val context = androidx.compose.ui.platform.LocalContext.current
+    val locationManager = remember { com.bitchat.android.geohash.LocationChannelManager.getInstance(context) }
+    
     Surface(
         modifier = Modifier
             .fillMaxWidth()
@@ -460,7 +468,12 @@ private fun ChatFloatingHeader(
                     onSidebarClick = onSidebarToggle,
                     onTripleClick = onPanicClear,
                     onShowAppInfo = onShowAppInfo,
-                    onLocationChannelsClick = onLocationChannelsClick
+                    onLocationChannelsClick = onLocationChannelsClick,
+                    onLocationNotesClick = {
+                        // Ensure location is loaded before showing sheet
+                        locationManager.refreshChannels()
+                        onLocationNotesClick()
+                    }
                 )
             },
             colors = TopAppBarDefaults.topAppBarColors(
@@ -471,6 +484,7 @@ private fun ChatFloatingHeader(
     }
 }
 
+@OptIn(ExperimentalMaterial3Api::class)
 @Composable
 private fun ChatDialogs(
     showPasswordDialog: Boolean,
@@ -483,6 +497,8 @@ private fun ChatDialogs(
     onAppInfoDismiss: () -> Unit,
     showLocationChannelsSheet: Boolean,
     onLocationChannelsSheetDismiss: () -> Unit,
+    showLocationNotesSheet: Boolean,
+    onLocationNotesSheetDismiss: () -> Unit,
     showUserSheet: Boolean,
     onUserSheetDismiss: () -> Unit,
     selectedUserForSheet: String,
@@ -520,6 +536,14 @@ private fun ChatDialogs(
             isPresented = showLocationChannelsSheet,
             onDismiss = onLocationChannelsSheetDismiss,
             viewModel = viewModel
+        )
+    }
+    
+    // Location notes sheet (extracted to separate presenter)
+    if (showLocationNotesSheet) {
+        LocationNotesSheetPresenter(
+            viewModel = viewModel,
+            onDismiss = onLocationNotesSheetDismiss
         )
     }
     

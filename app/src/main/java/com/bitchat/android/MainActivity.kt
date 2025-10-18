@@ -598,6 +598,9 @@ class MainActivity : ComponentActivity() {
                 PoWPreferenceManager.init(this@MainActivity)
                 Log.d("MainActivity", "PoW preferences initialized")
                 
+                // Initialize Location Notes Manager (extracted to separate file)
+                com.bitchat.android.nostr.LocationNotesInitializer.initialize(this@MainActivity)
+                
                 // Ensure all permissions are still granted (user might have revoked in settings)
                 if (!permissionManager.areAllPermissionsGranted()) {
                     val missing = permissionManager.getMissingPermissions()
