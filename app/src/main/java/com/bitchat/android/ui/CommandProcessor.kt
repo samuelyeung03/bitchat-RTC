@@ -2,6 +2,8 @@ package com.bitchat.android.ui
 
 import com.bitchat.android.mesh.BluetoothMeshService
 import com.bitchat.android.model.BitchatMessage
+import com.bitchat.android.model.BitchatMessageType
+import com.bitchat.android.protocol.MessageType
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
@@ -561,24 +563,23 @@ class CommandProcessor(
         meshService.sendPrivateMessage(content, peerID, recipientNickname, messageId)
     }
     private suspend fun sendPingPacketVia(meshService: BluetoothMeshService, peerID: String, recipientNickname: String, loops: Int) {
-        meshService.sendPingPacket(peerID, recipientNickname)
-        val systemMessage = BitchatMessage(
-            sender = "system",
-            content = "Pinging $recipientNickname with 32 bytes of data",
-            timestamp = Date(),
-            isRelay = false
-        )
-        messageManager.addMessage(systemMessage)
-        if (loops > 1){
-            for (i in 1 until loops){
-                meshService.sendPingPacket(peerID, recipientNickname)
-                val systemMessage = BitchatMessage(
-                    sender = "system",
-                    content = "Pinging $recipientNickname with 36 bytes of data",
-                    timestamp = Date(),
-                    isRelay = false
-                )
-                messageManager.addMessage(systemMessage)
+        for (i in 0 until loops) {
+            privateChatManager.sendPingPacket(
+                peerID,
+                recipientNickname,
+                state.getNicknameValue(),
+                getMyPeerID(meshService)
+            ) { content, peerIdParam, recipientNicknameParam, messageId ->
+                meshService.sendPingPacket(content, peerIdParam, recipientNicknameParam, messageId)
+            }
+            val systemMessage = BitchatMessage(
+                sender = "system",
+                content = "Pinging $recipientNickname with 32 bytes of data",
+                timestamp = Date(),
+                isRelay = false
+            )
+            messageManager.addMessage(systemMessage)
+            if (loops - i > 1) {
                 delay(1000)
             }
         }

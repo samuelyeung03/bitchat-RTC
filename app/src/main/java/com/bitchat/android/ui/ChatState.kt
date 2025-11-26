@@ -39,7 +39,8 @@ class ChatState {
     // Private chats
     private val _privateChats = MutableLiveData<Map<String, List<BitchatMessage>>>(emptyMap())
     val privateChats: LiveData<Map<String, List<BitchatMessage>>> = _privateChats
-    
+    private val _pingPackets = MutableLiveData<Map<String, List<BitchatMessage>>>(emptyMap())
+
     private val _selectedPrivateChatPeer = MutableLiveData<String?>(null)
     val selectedPrivateChatPeer: LiveData<String?> = _selectedPrivateChatPeer
     
@@ -155,6 +156,7 @@ class ChatState {
     fun getConnectedPeersValue() = _connectedPeers.value ?: emptyList()
     fun getNicknameValue() = _nickname.value
     fun getPrivateChatsValue() = _privateChats.value ?: emptyMap()
+    fun getPingPacketsValue() = _pingPackets.value ?: emptyMap()
     fun getSelectedPrivateChatPeerValue() = _selectedPrivateChatPeer.value
     fun getUnreadPrivateMessagesValue() = _unreadPrivateMessages.value ?: emptySet()
     fun getJoinedChannelsValue() = _joinedChannels.value ?: emptySet()
@@ -210,6 +212,10 @@ class ChatState {
     
     fun setPrivateChats(chats: Map<String, List<BitchatMessage>>) {
         _privateChats.value = chats
+    }
+
+    fun setPingPackets(pings: Map<String, List<BitchatMessage>>) {
+        _privateChats.value = pings
     }
     
     fun setSelectedPrivateChatPeer(peerID: String?) {

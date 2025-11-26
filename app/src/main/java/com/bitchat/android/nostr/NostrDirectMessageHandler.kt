@@ -185,6 +185,9 @@ class NostrDirectMessageHandler(
                     Log.w(TAG, "⚠️ Failed to decode Nostr file transfer from $convKey")
                 }
             }
+            com.bitchat.android.model.NoisePayloadType.PING -> {
+                TODO("Ping not respond from Nostr")
+            }
         }
     }
 

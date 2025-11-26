@@ -474,10 +474,6 @@ class BluetoothMeshService(private val context: Context) {
                 val req = RequestSyncPacket.decode(routed.packet.payload) ?: return
                 gossipSyncManager.handleRequestSync(fromPeer, req)
             }
-
-            override fun handelPingPacket(routed: RoutedPacket) {
-                serviceScope.launch { messageHandler.handlePingPacket(routed)}
-            }
         }
         
         // BluetoothConnectionManager delegates
@@ -799,7 +795,7 @@ class BluetoothMeshService(private val context: Context) {
             }
         }
     }
-    fun sendPingPacket(recipientPeerID: String, recipientNickname: String, messageID: String? = null) {
+    fun sendPingPacket(content: String, recipientPeerID: String, recipientNickname: String, messageID: String? = null) {
         if (recipientPeerID.isEmpty()) return
         if (recipientNickname.isEmpty()) return
         if (encryptionService.hasEstablishedSession(recipientPeerID))
@@ -808,7 +804,7 @@ class BluetoothMeshService(private val context: Context) {
                 // Create TLV-encoded private message exactly like iOS
                 val privateMessage = com.bitchat.android.model.PrivateMessagePacket(
                     messageID = finalMessageID,
-                    content = "pingpingpingpingping"
+                    content = content
                 )
 
                 val tlvData = privateMessage.encode()
@@ -819,7 +815,7 @@ class BluetoothMeshService(private val context: Context) {
 
                 // Create message payload with NoisePayloadType prefix: [type byte] + [TLV data]
                 val messagePayload = com.bitchat.android.model.NoisePayload(
-                    type = com.bitchat.android.model.NoisePayloadType.PRIVATE_MESSAGE,
+                    type = com.bitchat.android.model.NoisePayloadType.PING,
                     data = tlvData
                 )
 
