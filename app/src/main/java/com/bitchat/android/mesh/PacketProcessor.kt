@@ -156,7 +156,6 @@ class PacketProcessor(private val myPeerID: String) {
                         MessageType.NOISE_HANDSHAKE -> handleNoiseHandshake(routed)
                         MessageType.NOISE_ENCRYPTED -> handleNoiseEncrypted(routed)
                         MessageType.FILE_TRANSFER -> handleMessage(routed)
-                        MessageType.PING -> handelPingPacket(routed)
                         else -> {
                             validPacket = false
                             Log.w(TAG, "Unknown message type: ${packet.type}")
@@ -248,14 +247,6 @@ class PacketProcessor(private val myPeerID: String) {
     }
 
     /**
-     * Handle ping packet
-     */
-    private suspend fun handelPingPacket(routed: RoutedPacket){
-        val peerID = routed.peerID ?: "unknown"
-        Log.d(TAG, "Processing ping from ${formatPeerForLog(peerID)}")
-        delegate?.handelPingPacket(routed)
-    }
-    /**
      * Handle delivery acknowledgment
      */
 //    private suspend fun handleDeliveryAck(routed: RoutedPacket) {
@@ -328,7 +319,6 @@ interface PacketProcessorDelegate {
     fun handleLeave(routed: RoutedPacket)
     fun handleFragment(packet: BitchatPacket): BitchatPacket?
     fun handleRequestSync(routed: RoutedPacket)
-    fun handelPingPacket(routed: RoutedPacket)
     
     // Communication
     fun sendAnnouncementToPeer(peerID: String)

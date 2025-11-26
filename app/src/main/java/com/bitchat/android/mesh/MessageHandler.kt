@@ -144,8 +144,6 @@ class MessageHandler(private val myPeerID: String, private val appContext: andro
                     val messageID = String(noisePayload.data, Charsets.UTF_8)
                     Log.d(TAG, "📬 Delivery ACK received from $peerID for message $messageID")
 
-                    debugManager?.measureRTT(1)
-
                     // Simplified: Call delegate with messageID and peerID directly
                     delegate?.onDeliveryAckReceived(messageID, peerID)
                 }
@@ -158,6 +156,12 @@ class MessageHandler(private val myPeerID: String, private val appContext: andro
                     // Simplified: Call delegate with messageID and peerID directly
                     delegate?.onReadReceiptReceived(messageID, peerID)
                 }
+                com.bitchat.android.model.NoisePayloadType.PING -> {
+                    val messageID = routed.packet.payload.toString()
+                    val peerID = routed.packet.senderID.toString()
+                    debugManager?.addDebugMessage(DebugMessage.SystemMessage("📤 Sent ping ACK to $peerID for message $messageID"))
+                    sendDeliveryAck(messageID, peerID)
+                }
             }
             
         } catch (e: Exception) {
@@ -165,10 +169,8 @@ class MessageHandler(private val myPeerID: String, private val appContext: andro
         }
     }
     suspend fun handlePingPacket(routed: RoutedPacket){
-        val messageID = routed.packet.payload.toString()
-        val peerID = routed.packet.senderID.toString()
-        debugManager?.addDebugMessage(DebugMessage.SystemMessage("📤 Sent ping ACK to $peerID for message $messageID"))
-        sendDeliveryAck(messageID, peerID)
+
+
     }
     /**
      * Send delivery ACK for a received private message - exactly like iOS

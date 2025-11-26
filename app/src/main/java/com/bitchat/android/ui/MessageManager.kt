@@ -4,6 +4,7 @@ import com.bitchat.android.model.BitchatMessage
 import com.bitchat.android.model.DeliveryStatus
 import java.util.*
 import java.util.Collections
+import kotlin.collections.toMutableList
 
 /**
  * Handles all message-related operations including deduplication and organization
@@ -114,6 +115,23 @@ class MessageManager(private val state: ChatState) {
         }
     }
 
+    // Ping Management
+
+    fun addPingPacket(peerID: String, message: BitchatMessage){
+        val currentPingPackets = state.getPingPacketsValue().toMutableMap()
+        if (!currentPingPackets.containsKey(peerID)) {
+            currentPingPackets[peerID] = mutableListOf()
+        }
+        val pingMessages = currentPingPackets[peerID]?.toMutableList() ?: mutableListOf()
+        pingMessages.add(message)
+        currentPingPackets[peerID] = pingMessages
+        state.setPingPackets(currentPingPackets)
+    }
+
+    fun  clearPingPackets(){
+        state.setPingPackets(emptyMap())
+    }
+
     // Variant that does not mark unread (used when we know the message has been read already, e.g., persisted Nostr read store)
     fun addPrivateMessageNoUnread(peerID: String, message: BitchatMessage) {
         val currentPrivateChats = state.getPrivateChatsValue().toMutableMap()
@@ -207,9 +225,21 @@ class MessageManager(private val state: ChatState) {
     // MARK: - Delivery Status Updates
     
     fun updateMessageDeliveryStatus(messageID: String, status: DeliveryStatus) {
+        var updated = false
+        val pingPackets = state.getPingPacketsValue().toMutableMap()
+        if (pingPackets.isNotEmpty()){
+           pingPackets.forEach { (peerID, messages) ->
+               val updatedMessages = messages.toMutableList()
+               val messageIndex = updatedMessages.indexOfFirst { it.id == messageID }
+               if (messageIndex >= 0) {
+                   val RTT = System.currentTimeMillis() - updatedMessages[messageIndex].timestamp
+                   updatedMessages.removeAt(messageIndex)
+                   updated = true
+               }
+           }
+        }
         // Update in private chats
         val updatedPrivateChats = state.getPrivateChatsValue().toMutableMap()
-        var updated = false
         
         updatedPrivateChats.forEach { (peerID, messages) ->
             val updatedMessages = messages.toMutableList()
