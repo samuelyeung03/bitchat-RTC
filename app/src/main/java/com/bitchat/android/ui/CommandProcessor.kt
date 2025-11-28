@@ -579,9 +579,19 @@ class CommandProcessor(
                 isRelay = false
             )
             messageManager.addMessage(systemMessage)
-            if (loops - i > 1) {
-                delay(1000)
-            }
+            delay(1000)
         }
+        val rttValues = state.getRttValues()
+        state.clearRtt()
+        val size = rttValues.size
+        val packetLost = (loops - size)/loops * 100
+        val meanRtt = rttValues.sum()/size
+        val systemMessage = BitchatMessage(
+            sender = "system",
+            content = "Pinged $loops packets with average rtt: $meanRtt , $packetLost % packet lost",
+            timestamp = Date(),
+            isRelay = false
+        )
+        messageManager.addMessage(systemMessage)
     }
 }

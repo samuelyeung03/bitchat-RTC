@@ -157,10 +157,12 @@ class MessageHandler(private val myPeerID: String, private val appContext: andro
                     delegate?.onReadReceiptReceived(messageID, peerID)
                 }
                 com.bitchat.android.model.NoisePayloadType.PING -> {
-                    val messageID = routed.packet.payload.toString()
-                    val peerID = routed.packet.senderID.toString()
-                    debugManager?.addDebugMessage(DebugMessage.SystemMessage("📤 Sent ping ACK to $peerID for message $messageID"))
-                    sendDeliveryAck(messageID, peerID)
+                    val privateMessage = com.bitchat.android.model.PrivateMessagePacket.decode(noisePayload.data)
+                    if (privateMessage != null){
+                        val messageID = privateMessage.messageID
+                        debugManager?.addDebugMessage(DebugMessage.SystemMessage("📤 Sent ping ACK to $peerID for message $messageID"))
+                        sendDeliveryAck(messageID, peerID)
+                    }
                 }
             }
             

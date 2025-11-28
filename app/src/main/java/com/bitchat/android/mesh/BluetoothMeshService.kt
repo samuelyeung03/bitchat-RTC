@@ -825,7 +825,7 @@ class BluetoothMeshService(private val context: Context) {
                 // Create NOISE_ENCRYPTED packet exactly like iOS
                 val packet = BitchatPacket(
                     version = 1u,
-                    type = MessageType.PING.value,
+                    type = MessageType.NOISE_ENCRYPTED.value,
                     senderID = hexStringToByteArray(myPeerID),
                     recipientID = hexStringToByteArray(recipientPeerID),
                     timestamp = System.currentTimeMillis().toULong(),
