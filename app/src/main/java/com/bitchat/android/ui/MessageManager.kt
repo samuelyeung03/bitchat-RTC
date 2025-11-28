@@ -123,7 +123,8 @@ class MessageManager(private val state: ChatState) {
             currentPingPackets[peerID] = mutableListOf()
         }
         val pingMessages = currentPingPackets[peerID]?.toMutableList() ?: mutableListOf()
-        pingMessages.add(message)
+        val timestamp = System.currentTimeMillis()
+        pingMessages.add(message to timestamp)
         currentPingPackets[peerID] = pingMessages
         state.setPingPackets(currentPingPackets)
     }
@@ -230,11 +231,20 @@ class MessageManager(private val state: ChatState) {
         if (pingPackets.isNotEmpty()){
            pingPackets.forEach { (peerID, messages) ->
                val updatedMessages = messages.toMutableList()
-               val messageIndex = updatedMessages.indexOfFirst { it.id == messageID }
+               val messageIndex = updatedMessages.indexOfFirst { (messages) -> messages.id == messageID }
                if (messageIndex >= 0) {
-                   val RTT = System.currentTimeMillis() - updatedMessages[messageIndex].timestamp
+                   val (_,timestamp) = updatedMessages[messageIndex]
+                   val rtt = System.currentTimeMillis() - timestamp
                    updatedMessages.removeAt(messageIndex)
-                   updated = true
+                   val systemMessage = BitchatMessage(
+                       sender = "system",
+                       content = "received ack, RTT: $rtt",
+                       timestamp = Date(),
+                       isRelay = false
+                   )
+                   addMessage(systemMessage)
+                   state.addRttValues(rtt)
+                   return
                }
            }
         }
