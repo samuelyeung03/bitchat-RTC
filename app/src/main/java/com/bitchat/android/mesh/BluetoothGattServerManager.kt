@@ -154,6 +154,17 @@ class BluetoothGattServerManager(
         if (!permissionManager.hasBluetoothPermissions()) return
         
         val serverCallback = object : BluetoothGattServerCallback() {
+            override fun onNotificationSent(device: BluetoothDevice?, status: Int) {
+                if (!isActive){
+                    Log.d(TAG, "Server: Ignoring notification after shutdown")
+                    return
+                }
+                if (status == BluetoothGatt.GATT_SUCCESS){
+                    Log.d(TAG, "Notification sent successfully to ${device?.address}")
+                } else {
+                    Log.e(TAG, "Notification failed to ${device?.address}, status: $status")
+                }
+            }
             override fun onConnectionStateChange(device: BluetoothDevice, status: Int, newState: Int) {
                 // Guard against callbacks after service shutdown
                 if (!isActive) {

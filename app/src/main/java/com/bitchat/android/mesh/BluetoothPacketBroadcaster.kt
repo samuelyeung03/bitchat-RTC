@@ -384,7 +384,7 @@ class BluetoothPacketBroadcaster(
         return try {
             characteristic?.let { char ->
                 char.value = data
-                val result = gattServer?.notifyCharacteristicChanged(device, char, false) ?: false
+                val result = gattServer?.notifyCharacteristicChanged(device, char, true) ?: false
                 result
             } ?: false
         } catch (e: Exception) {
