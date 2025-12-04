@@ -388,6 +388,20 @@ class BluetoothGattClientManager(
         Log.i(TAG, "Connecting to bitchat device: $deviceAddress")
         
         val gattCallback = object : BluetoothGattCallback() {
+            override fun onCharacteristicWrite(
+                gatt: BluetoothGatt?,
+                characteristic: BluetoothGattCharacteristic?,
+                status: Int
+            ) {
+                if (status == BluetoothGatt.GATT_SUCCESS) {
+                    Log.d(TAG, "Client: Characteristic write successful to $deviceAddress")
+                } else {
+                    Log.e(
+                        TAG,
+                        "Client: Characteristic write failed to $deviceAddress, status: $status"
+                    )
+                }
+            }
             override fun onConnectionStateChange(gatt: BluetoothGatt, status: Int, newState: Int) {
                 Log.d(TAG, "Client: Connection state change - Device: $deviceAddress, Status: $status, NewState: $newState")
 
