@@ -433,10 +433,6 @@ class CommandProcessor(
             return
         }
 
-        // Start private chat (prepares state)
-        val started = privateChatManager.startPrivateChat(peerID, meshService)
-        if (!started) return
-
         // If already in a call with this peer, inform user
         if (activeCalls.containsKey(peerID)) {
             val systemMessage = BitchatMessage(sender = "system", content = "Already in a call with $targetName", timestamp = Date(), isRelay = false)
@@ -445,17 +441,13 @@ class CommandProcessor(
         }
 
         // Create an RTCManager that will send BitchatPacket via meshService
-        val rtc = com.bitchat.android.rtc.RTCManager(sendPacket = { pkt ->
-            try {
-                if (pkt.recipientID != null && !pkt.recipientID.contentEquals(com.bitchat.android.protocol.SpecialRecipients.BROADCAST)) {
-                    val hex = pkt.recipientID.joinToString("") { "%02x".format(it) }
-                    val recipientHex = if (hex.length >= 16) hex.substring(0, 16) else hex
-                    meshService.sendAudioFrame(recipientHex, pkt.payload, true)
-                } else {
-                    meshService.sendAudioFrame(null, pkt.payload, false)
-                }
-            } catch (_: Exception) { }
-        })
+        val rtc = com.bitchat.android.rtc.RTCManager(
+            context = null,
+            meshService = meshService,
+            sampleRate = 48000,
+            channels = 1,
+            bitrate = 6000 // lowest practical bitrate to minimize network usage
+        )
 
         activeCalls[peerID] = rtc
         rtc.startCall(senderId = state.getNicknameValue() ?: meshService.myPeerID, recipientId = peerID)

@@ -1,11 +1,58 @@
 #include <jni.h>
 #include <opus/opus.h>
 #include <vector>
+#include <android/log.h>
 
-extern "C" JNIEXPORT jlong JNICALL Java_com_bitchat_android_rtc_OpusWrapper_nativeCreateEncoder(JNIEnv* env, jclass /* cls */, jint sampleRate, jint channels) {
+#define LOG_TAG "opus_jni"
+#define LOGD(...) __android_log_print(ANDROID_LOG_DEBUG, LOG_TAG, __VA_ARGS__)
+#define LOGI(...) __android_log_print(ANDROID_LOG_INFO,  LOG_TAG, __VA_ARGS__)
+#define LOGW(...) __android_log_print(ANDROID_LOG_WARN,  LOG_TAG, __VA_ARGS__)
+#define LOGE(...) __android_log_print(ANDROID_LOG_ERROR, LOG_TAG, __VA_ARGS__)
+
+extern "C" JNIEXPORT jlong JNICALL Java_com_bitchat_android_rtc_OpusWrapper_nativeCreateEncoder(JNIEnv* env, jclass /* cls */, jint sampleRate, jint channels, jint bitrate) {
     int error;
     OpusEncoder* enc = opus_encoder_create(sampleRate, channels, OPUS_APPLICATION_VOIP, &error);
-    if (error != OPUS_OK) return 0;
+    if (error != OPUS_OK) {
+        LOGE("opus_encoder_create failed: %d", error);
+        return 0;
+    }
+
+    // Set target bitrate if provided (bits per second). If bitrate <= 0, do not change default.
+    if (bitrate > 0) {
+        int ret = opus_encoder_ctl(enc, OPUS_SET_BITRATE(bitrate));
+        if (ret != OPUS_OK) {
+            // If setting bitrate fails, destroy encoder and return 0
+            LOGE("OPUS_SET_BITRATE failed: %d", ret);
+            opus_encoder_destroy(enc);
+            return 0;
+        }
+    }
+
+    // Try to set signal type to voice to improve encoding behaviour
+    opus_encoder_ctl(enc, OPUS_SET_SIGNAL(OPUS_SIGNAL_VOICE));
+
+    // Disable VBR
+    opus_encoder_ctl(enc, OPUS_SET_VBR(0));
+
+    // Disable DTX to avoid 1-byte SID frames when silence is detected
+    opus_encoder_ctl(enc, OPUS_SET_DTX(0));
+
+    // Moderate complexity to balance quality/CPU
+    opus_encoder_ctl(enc, OPUS_SET_COMPLEXITY(5));
+
+    // Query and log current encoder parameters for debugging
+    {
+        int current_bitrate = 0;
+        int vbr = 0;
+        int dtx = 0;
+        int complexity = 0;
+        opus_encoder_ctl(enc, OPUS_GET_BITRATE(&current_bitrate));
+        opus_encoder_ctl(enc, OPUS_GET_VBR(&vbr));
+        opus_encoder_ctl(enc, OPUS_GET_DTX(&dtx));
+        opus_encoder_ctl(enc, OPUS_GET_COMPLEXITY(&complexity));
+        LOGI("Encoder created: sampleRate=%d channels=%d bitrate=%d vbr=%d dtx=%d complexity=%d", sampleRate, channels, current_bitrate, vbr, dtx, complexity);
+    }
+
     return reinterpret_cast<jlong>(enc);
 }
 
@@ -25,6 +72,9 @@ extern "C" JNIEXPORT jbyteArray JNICALL Java_com_bitchat_android_rtc_OpusWrapper
 
     // len is the number of samples in the array; use that as frame_size
     int encoded = opus_encode(enc, reinterpret_cast<const opus_int16*>(pcmElems), len, out.data(), maxDataBytes);
+
+    // Log frame size and encoded length so we can inspect unusual tiny packets
+    LOGD("nativeEncode: frame_samples=%d encoded_bytes=%d", (int)len, encoded);
 
     env->ReleaseShortArrayElements(pcm, pcmElems, 0);
 

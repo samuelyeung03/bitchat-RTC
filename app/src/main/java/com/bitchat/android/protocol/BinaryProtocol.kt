@@ -13,7 +13,7 @@ enum class MessageType(val value: UByte) {
     ANNOUNCE(0x01u),
     MESSAGE(0x02u),  // All user messages (private and broadcast)
     LEAVE(0x03u),
-    AUDIO(0x12u), // Audio packet type (used by RTCManager)
+    Voice(0x12u), // Audio packet type (used by RTCManager)
     PING(0x4u),
     PONG(0x5u),
     NOISE_HANDSHAKE(0x10u),  // Noise handshake

@@ -7,7 +7,7 @@ internal class OpusWrapper {
         }
 
         @JvmStatic
-        private external fun nativeCreateEncoder(sampleRate: Int, channels: Int): Long
+        private external fun nativeCreateEncoder(sampleRate: Int, channels: Int, bitrate: Int): Long
 
         @JvmStatic
         private external fun nativeEncode(encPtr: Long, pcm: ShortArray): ByteArray?
@@ -18,7 +18,8 @@ internal class OpusWrapper {
         @JvmStatic
         private external fun nativeDestroyEncoder(encPtr: Long)
 
-        fun createEncoder(sampleRate: Int, channels: Int): Long = nativeCreateEncoder(sampleRate, channels)
+        // Updated to accept bitrate (bits per second)
+        fun createEncoder(sampleRate: Int, channels: Int, bitrate: Int): Long = nativeCreateEncoder(sampleRate, channels, bitrate)
         fun encode(encPtr: Long, pcm: ShortArray): ByteArray? = nativeEncode(encPtr, pcm)
         fun decode(opusData: ByteArray, sampleRate: Int, channels: Int): ShortArray? = nativeDecode(opusData, sampleRate, channels)
         fun destroyEncoder(encPtr: Long) = nativeDestroyEncoder(encPtr)

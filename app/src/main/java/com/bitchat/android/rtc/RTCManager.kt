@@ -1,6 +1,7 @@
 package com.bitchat.android.rtc
 
 import android.Manifest
+import android.annotation.SuppressLint
 import android.app.AppOpsManager
 import android.content.Context
 import android.content.pm.PackageManager
@@ -11,12 +12,9 @@ import android.os.Build
 import android.os.Process
 import android.util.Log
 import androidx.core.content.ContextCompat
-import com.bitchat.android.protocol.BitchatPacket
-import com.bitchat.android.protocol.SpecialRecipients
-import com.bitchat.android.protocol.MessageType
+import com.bitchat.android.mesh.BluetoothMeshService
 import kotlinx.coroutines.*
 import java.util.*
-import kotlin.math.ceil
 
 /**
  * Real-time voice call manager:
@@ -27,29 +25,67 @@ import kotlin.math.ceil
  *
  * Usage:
  * val mgr = RTCManager(context, sendPacket = { packet -> /* send over mesh */ })
+ * --OR--
+ * val mgr = RTCManager(context, meshService = meshService)
  * mgr.startCall("sender", "recipient")
  * mgr.stopCall()
  */
 class RTCManager(
     private val context: Context? = null,
-    private val sendPacket: suspend (BitchatPacket) -> Unit,
-    private val sampleRate: Int = 4800,
+    private val sampleRate: Int = 48000,
     private val channels: Int = 1,
-    private val bitrate: Int = 24000 // example bitrate
+    private val bitrate: Int = 36000 // use a very low default bitrate (6 kbps) to minimize bandwidth
 ) {
     companion object {
         private const val TAG = "RTCManager"
-        private const val FRAME_SAMPLES = 12000
+        // changed: use a larger Opus-friendly frame size (960 samples = 20ms @48k).
+        // 20ms frames are a common default and will produce larger encoded payloads
+        // compared to very small 2.5ms frames which may compress to only a few bytes.
+        private const val FRAME_SAMPLES = 2880
         private const val BYTES_PER_SAMPLE = 2
-        private const val FRAGMENT_PAYLOAD_SIZE = 469
     }
 
     private var recordingJob: Job? = null
     private val scope = CoroutineScope(Dispatchers.IO + SupervisorJob())
     private var encoderPtr: Long = 0L
 
+    // Keep an optional reference to BluetoothMeshService when constructed that way
+    private var meshServiceRef: BluetoothMeshService? = null
+
+    // Convenience constructor that takes BluetoothMeshService and uses it to send encoded frames
+    constructor(context: Context? = null, meshService: BluetoothMeshService, sampleRate: Int = 48000, channels: Int = 1, bitrate: Int = 6000) : this(context, sampleRate, channels, bitrate) {
+        this.meshServiceRef = meshService
+    }
+
+    // New: allow attaching/detaching mesh service at runtime
+    fun attachMeshService(meshService: BluetoothMeshService) {
+        meshServiceRef = meshService
+        Log.d(TAG, "attachMeshService: attached mesh service")
+    }
+
+    fun detachMeshService() {
+        meshServiceRef = null
+        Log.d(TAG, "detachMeshService: detached mesh service")
+    }
+
+    // Helper: encode PCM via native Opus wrapper (returns opus packet bytes or null)
+    private fun encodeOpus(pcm: ShortArray): ByteArray? {
+        return try {
+            if (encoderPtr == 0L) return null
+            OpusWrapper.encode(encoderPtr, pcm)
+        } catch (e: Exception) {
+            Log.w(TAG, "Opus encode failed: ${e.message}")
+            null
+        }
+    }
+
+    @SuppressLint("MissingPermission")
     fun startCall(senderId: String, recipientId: String?) {
-        if (recordingJob != null) return
+        Log.d(TAG, "startCall: senderId=$senderId recipientId=$recipientId")
+        if (recordingJob != null) {
+            Log.d(TAG, "startCall: recording already active, ignoring")
+            return
+        }
 
         // If we have context, verify RECORD_AUDIO permission + AppOps before starting
         if (context != null) {
@@ -62,23 +98,39 @@ class RTCManager(
             Log.w(TAG, "No Context provided to RTCManager; unable to check RECORD_AUDIO AppOps. Proceeding (may fail at runtime)")
         }
 
+        // Ensure runtime permission explicitly before initializing encoder
+        if (context != null && ContextCompat.checkSelfPermission(context, Manifest.permission.RECORD_AUDIO) != PackageManager.PERMISSION_GRANTED) {
+            Log.e(TAG, "Missing RECORD_AUDIO permission before encoder init")
+            return
+        }
+
         try {
-            encoderPtr = OpusWrapper.createEncoder(sampleRate, channels)
+            encoderPtr = OpusWrapper.createEncoder(sampleRate, channels, bitrate)
             if (encoderPtr == 0L) {
                 Log.e(TAG, "Failed to create native Opus encoder")
                 return
             }
+            Log.d(TAG, "Encoder created: ptr=$encoderPtr sampleRate=$sampleRate channels=$channels bitrate=$bitrate")
         } catch (e: Exception) {
             Log.e(TAG, "Failed to init native Opus encoder: ${e.message}", e)
             return
         }
 
         recordingJob = scope.launch {
+            Log.d(TAG, "Recording coroutine started")
+            // Explicit runtime permission check to satisfy lint/static analyzers
+            if (context != null && ContextCompat.checkSelfPermission(context, Manifest.permission.RECORD_AUDIO) != PackageManager.PERMISSION_GRANTED) {
+                Log.e(TAG, "Missing RECORD_AUDIO permission at recording start")
+                return@launch
+            }
+
             val minBuffer = AudioRecord.getMinBufferSize(
                 sampleRate,
                 AudioFormat.CHANNEL_IN_MONO,
                 AudioFormat.ENCODING_PCM_16BIT
             ).coerceAtLeast(FRAME_SAMPLES * BYTES_PER_SAMPLE)
+
+            Log.d(TAG, "AudioRecord minBuffer=$minBuffer FRAME_SAMPLES=$FRAME_SAMPLES")
 
             val recorder = AudioRecord(
                 MediaRecorder.AudioSource.VOICE_COMMUNICATION,
@@ -93,6 +145,7 @@ class RTCManager(
                 return@launch
             }
 
+            Log.d(TAG, "AudioRecord initialized, starting recording")
             recorder.startRecording()
             val shortBuffer = ShortArray(FRAME_SAMPLES)
 
@@ -106,31 +159,34 @@ class RTCManager(
                     }
 
                     val encoded = encodeOpus(shortBuffer)
-                    if (encoded != null && encoded.isNotEmpty()) {
-                        // Create a single AUDIO packet and send; BluetoothPacketBroadcaster will fragment if required
-                        if (recipientId != null) {
-                            // Use primary constructor with binary sender/recipient IDs (8 bytes each)
-                            val pkt = BitchatPacket(
-                                version = 1u,
-                                type = MessageType.AUDIO.value,
-                                senderID = hexStringToByteArray(senderId),
-                                recipientID = hexStringToByteArray(recipientId),
-                                timestamp = System.currentTimeMillis().toULong(),
-                                payload = encoded,
-                                signature = null,
-                                ttl = com.bitchat.android.util.AppConstants.MESSAGE_TTL_HOPS
-                            )
-                            sendPacket(pkt)
-                        } else {
-                            // Use convenience secondary constructor that accepts senderID as hex string
-                            val pkt = BitchatPacket(
-                                type = MessageType.AUDIO.value,
-                                ttl = com.bitchat.android.util.AppConstants.MESSAGE_TTL_HOPS,
-                                senderID = senderId,
-                                payload = encoded
-                            )
-                            sendPacket(pkt)
+                    if (encoded == null) {
+                        Log.w(TAG, "encodeOpus returned null for frame size=${shortBuffer.size}")
+                        continue
+                    }
+
+                    if (encoded.isEmpty()) {
+                        Log.w(TAG, "encodeOpus returned empty payload")
+                        continue
+                    }
+
+                    val payload: ByteArray = encoded
+                    Log.d(TAG, "Encoded frame ready: size=${payload.size} bytes")
+
+                    // Warn if encoded payload is unusually small (helps debug one-sample-like packets)
+                    if (payload.size <= 4) {
+                        Log.w(TAG, "Encoded payload very small (<=4 bytes). Consider checking encoder config or increasing frame size.")
+                    }
+
+                    // Hand off encoded frame to mesh service to build/send the packet.
+                    try {
+                        meshServiceRef?.let { ms ->
+                            Log.d(TAG, "Handing encoded frame to meshService, recipientId=$recipientId")
+                            ms.sendVoice(recipientId, payload)
+                        } ?: run {
+                            Log.w(TAG, "No BluetoothMeshService attached — call attachMeshService(meshService) before startCall")
                         }
+                    } catch (e: Exception) {
+                        Log.w(TAG, "Failed to hand encoded audio to mesh service: ${e.message}")
                     }
                 }
             } catch (e: Exception) {
@@ -138,52 +194,35 @@ class RTCManager(
             } finally {
                 try { recorder.stop() } catch (_: Exception) {}
                 try { recorder.release() } catch (_: Exception) {}
+                Log.d(TAG, "Recorder stopped and released")
             }
         }
     }
 
     fun stopCall() {
+        Log.d(TAG, "stopCall: cancelling recording job and cleaning up encoder")
         recordingJob?.cancel()
         recordingJob = null
         if (encoderPtr != 0L) {
             OpusWrapper.destroyEncoder(encoderPtr)
             encoderPtr = 0L
+            Log.d(TAG, "Encoder destroyed")
         }
-    }
-
-    private fun encodeOpus(pcm: ShortArray): ByteArray? {
-        if (encoderPtr == 0L) return null
-        return try {
-            OpusWrapper.encode(encoderPtr, pcm)
-        } catch (e: Exception) {
-            Log.e(TAG, "Native Opus encode failed: ${e.message}", e)
-            null
-        }
-    }
-
-    private fun hexStringToByteArray(hexString: String): ByteArray {
-        val result = ByteArray(8) { 0 }
-        var temp = hexString
-        var idx = 0
-        while (temp.length >= 2 && idx < 8) {
-            val byteStr = temp.substring(0, 2)
-            val b = byteStr.toIntOrNull(16)?.toByte()
-            if (b != null) result[idx] = b
-            temp = temp.substring(2)
-            idx++
-        }
-        return result
     }
 
     // Permission + AppOps check
     private fun hasRecordAudioPermissionWithAppOps(ctx: Context): Boolean {
         // Check runtime permission
         val granted = ContextCompat.checkSelfPermission(ctx, Manifest.permission.RECORD_AUDIO) == PackageManager.PERMISSION_GRANTED
+        Log.d(TAG, "hasRecordAudioPermissionWithAppOps: runtime permission granted=$granted")
         if (!granted) return false
 
         // Check AppOps (may block even when permission granted)
         try {
-            val appOps = ctx.getSystemService(Context.APP_OPS_SERVICE) as? AppOpsManager ?: return true
+            val appOps = ctx.getSystemService(Context.APP_OPS_SERVICE) as? AppOpsManager ?: run {
+                Log.d(TAG, "hasRecordAudioPermissionWithAppOps: AppOpsManager not available, allowing")
+                return true
+            }
             val uid = Process.myUid()
             val mode = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
                 appOps.unsafeCheckOpNoThrow(AppOpsManager.OPSTR_RECORD_AUDIO, uid, ctx.packageName)
@@ -191,10 +230,13 @@ class RTCManager(
                 // Fallback for older APIs
                 appOps.checkOpNoThrow(AppOpsManager.OPSTR_RECORD_AUDIO, uid, ctx.packageName)
             }
+            Log.d(TAG, "hasRecordAudioPermissionWithAppOps: appops mode=$mode")
             return mode == AppOpsManager.MODE_ALLOWED
         } catch (e: Exception) {
             Log.w(TAG, "AppOps check failed: ${e.message}")
             return true
         }
     }
+
+
 }
