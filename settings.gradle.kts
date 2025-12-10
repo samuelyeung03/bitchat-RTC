@@ -11,6 +11,7 @@ dependencyResolutionManagement {
         google()
         mavenCentral()
         // Guardian Project raw GitHub Maven (hosts info.guardianproject:arti-mobile-ex)
+        maven { url = uri("https://jitpack.io") }
         maven { url = uri("https://raw.githubusercontent.com/guardianproject/gpmaven/master") }
     }
 }

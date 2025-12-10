@@ -24,6 +24,8 @@ class CommandProcessor(
     private val scope = CoroutineScope(Dispatchers.Main)
     // Available commands list
     private val baseCommands = listOf(
+        CommandSuggestion("/call", emptyList(), "<nickname>", "start a voice call with a peer"),
+        CommandSuggestion("/hangup", emptyList(), "[nickname]", "hang up a voice call"),
         CommandSuggestion("/ping",listOf(), "<nickname>", "ping a peer"),
         CommandSuggestion("/block", emptyList(), "[nickname]", "block or list blocked peers"),
         CommandSuggestion("/channels", emptyList(), null, "show all discovered channels"),
@@ -37,7 +39,9 @@ class CommandProcessor(
     )
 
     // MARK: - Command Processing
-    
+    // Active RTC managers by peerID
+    private val activeCalls = mutableMapOf<String, com.bitchat.android.rtc.RTCManager>()
+
     fun processCommand(command: String, meshService: BluetoothMeshService, myPeerID: String, onSendMessage: (String, List<String>, String?) -> Unit, viewModel: ChatViewModel? = null): Boolean {
         if (!command.startsWith("/")) return false
         
@@ -55,6 +59,8 @@ class CommandProcessor(
             "/slap" -> handleActionCommand(parts, "slaps", "around a bit with a large trout 🐟", meshService, myPeerID, onSendMessage)
             "/channels" -> handleChannelsCommand()
             "/ping" -> handlePingCommand(parts, meshService)
+            "/call" -> handleCallCommand(parts, meshService)
+            "/hangup" -> handleHangupCommand(parts, meshService)
             else -> handleUnknownCommand(cmd)
         }
         
@@ -402,6 +408,78 @@ class CommandProcessor(
             messageManager.addMessage(systemMessage)
         }
     }
+    private fun handleCallCommand(parts: List<String>, meshService: BluetoothMeshService) {
+        if (parts.size < 2) {
+            val systemMessage = BitchatMessage(
+                sender = "system",
+                content = "usage: /call <nickname>",
+                timestamp = Date(),
+                isRelay = false
+            )
+            messageManager.addMessage(systemMessage)
+            return
+        }
+
+        val targetName = parts[1].removePrefix("@")
+        val peerID = getPeerIDForNickname(targetName, meshService)
+        if (peerID == null) {
+            val systemMessage = BitchatMessage(
+                sender = "system",
+                content = "user '$targetName' not found.",
+                timestamp = Date(),
+                isRelay = false
+            )
+            messageManager.addMessage(systemMessage)
+            return
+        }
+
+        // Start private chat (prepares state)
+        val started = privateChatManager.startPrivateChat(peerID, meshService)
+        if (!started) return
+
+        // If already in a call with this peer, inform user
+        if (activeCalls.containsKey(peerID)) {
+            val systemMessage = BitchatMessage(sender = "system", content = "Already in a call with $targetName", timestamp = Date(), isRelay = false)
+            messageManager.addMessage(systemMessage)
+            return
+        }
+
+        // Create an RTCManager that will send BitchatPacket via meshService
+        val rtc = com.bitchat.android.rtc.RTCManager(sendPacket = { pkt ->
+            try {
+                if (pkt.recipientID != null && !pkt.recipientID.contentEquals(com.bitchat.android.protocol.SpecialRecipients.BROADCAST)) {
+                    val hex = pkt.recipientID.joinToString("") { "%02x".format(it) }
+                    val recipientHex = if (hex.length >= 16) hex.substring(0, 16) else hex
+                    meshService.sendAudioFrame(recipientHex, pkt.payload, true)
+                } else {
+                    meshService.sendAudioFrame(null, pkt.payload, false)
+                }
+            } catch (_: Exception) { }
+        })
+
+        activeCalls[peerID] = rtc
+        rtc.startCall(senderId = state.getNicknameValue() ?: meshService.myPeerID, recipientId = peerID)
+
+        val systemMessage = BitchatMessage(sender = "system", content = "Calling $targetName...", timestamp = Date(), isRelay = false)
+        messageManager.addMessage(systemMessage)
+    }
+
+    private fun handleHangupCommand(parts: List<String>, meshService: BluetoothMeshService) {
+        val targetPeerID = if (parts.size > 1) getPeerIDForNickname(parts[1].removePrefix("@"), meshService) else null
+        if (targetPeerID != null) {
+            val rtc = activeCalls.remove(targetPeerID)
+            rtc?.stopCall()
+            val systemMessage = BitchatMessage(sender = "system", content = "Call with ${getPeerNickname(targetPeerID, meshService)} ended.", timestamp = Date(), isRelay = false)
+            messageManager.addMessage(systemMessage)
+        } else {
+            // Hang up all calls
+            activeCalls.values.forEach { it.stopCall() }
+            activeCalls.clear()
+            val systemMessage = BitchatMessage(sender = "system", content = "All calls ended.", timestamp = Date(), isRelay = false)
+            messageManager.addMessage(systemMessage)
+        }
+    }
+
     private fun handleUnknownCommand(cmd: String) {
         val systemMessage = BitchatMessage(
             sender = "system",
