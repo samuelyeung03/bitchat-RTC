@@ -159,6 +159,7 @@ class PacketProcessor(private val myPeerID: String) {
                         MessageType.NOISE_HANDSHAKE -> handleNoiseHandshake(routed)
                         MessageType.NOISE_ENCRYPTED -> handleNoiseEncrypted(routed)
                         MessageType.FILE_TRANSFER -> handleMessage(routed)
+                        MessageType.AUDIO -> handleAudio(routed) // AUDIO is private - use dedicated handler
                         else -> {
                             validPacket = false
                             Log.w(TAG, "Unknown message type: ${packet.type}")
@@ -260,11 +261,22 @@ class PacketProcessor(private val myPeerID: String) {
         Log.d(TAG, "Processing REQUEST_SYNC from ${formatPeerForLog(peerID)}")
         delegate?.handleRequestSync(routed)
     }
-//    private suspend fun handlePing(routed: RoutedPacket) {
-//        val peerID = routed.peerID ?: "unknown"
-//        Log.d(TAG, "Processing Ping from ${formatPeerForLog(peerID)}")
-//        delegate?.handleMessage(routed)
-//    }
+
+    /**
+     * Handle private AUDIO packets. Keep logic centralized here and delegate to MessageHandler
+     * (MessageHandler will perform Opus decoding and playback in its private message path).
+     */
+    private suspend fun handleAudio(routed: RoutedPacket) {
+        val peerID = routed.peerID ?: "unknown"
+        Log.d(TAG, "Processing AUDIO (private) from ${formatPeerForLog(peerID)}")
+        try {
+            // Forward to delegate's dedicated audio handler (MessageHandler will decode & play)
+            delegate?.handleAudio(routed)
+        } catch (e: Exception) {
+            Log.e(TAG, "Failed to process AUDIO from ${formatPeerForLog(peerID)}: ${e.message}")
+        }
+    }
+
     /**
      * Handle delivery acknowledgment
      */
@@ -345,4 +357,6 @@ interface PacketProcessorDelegate {
     fun sendAnnouncementToPeer(peerID: String)
     fun sendCachedMessages(peerID: String)
     fun relayPacket(routed: RoutedPacket)
+    // New: dedicated audio handler for private AUDIO packets
+    fun handleAudio(routed: RoutedPacket)
 }

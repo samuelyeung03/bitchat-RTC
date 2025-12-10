@@ -454,6 +454,11 @@ class BluetoothMeshService(private val context: Context) {
                 serviceScope.launch { messageHandler.handleLeave(routed) }
             }
             
+            override fun handleAudio(routed: RoutedPacket) {
+                // Audio is private-only; decode+play on the service scope via MessageHandler
+                serviceScope.launch { messageHandler.handleAudio(routed) }
+            }
+
             override fun handleFragment(packet: BitchatPacket): BitchatPacket? {
                 // Track broadcast fragments for gossip sync
                 try {
@@ -805,29 +810,71 @@ class BluetoothMeshService(private val context: Context) {
         }
     }
     fun sendPingPacket(recipientPeerID: String, recipientNickname: String, messageID: String) {
-        if (recipientPeerID.isEmpty()) return
-        if (recipientNickname.isEmpty()) return
-        if (encryptionService.hasEstablishedSession(recipientPeerID))
-            serviceScope.launch {
-                val payload = messageID.toByteArray()
-                val packet = BitchatPacket(
-                    version = 1u,
-                    type = MessageType.PING.value,
-                    senderID = hexStringToByteArray(myPeerID),
-                    recipientID = hexStringToByteArray(recipientPeerID),
-                    timestamp = System.currentTimeMillis().toULong(),
-                    payload = payload,
-                    signature = null,
-                    ttl = MAX_TTL
-                )
-                NetworkMetricsManager.registerSendTimestamp(recipientPeerID,messageID)
-                connectionManager.broadcastPacket(RoutedPacket(packet))
-                Log.d(TAG, "📤 Sent ping packet to $recipientPeerID")
-        } else {
-            messageHandler.delegate?.initiateNoiseHandshake(recipientPeerID)
+         if (recipientPeerID.isEmpty()) return
+         if (recipientNickname.isEmpty()) return
+        serviceScope.launch {
+            val payload = messageID.toByteArray()
+            val packet = BitchatPacket(
+                version = 1u,
+                type = MessageType.PING.value,
+                senderID = hexStringToByteArray(myPeerID),
+                recipientID = hexStringToByteArray(recipientPeerID),
+                timestamp = System.currentTimeMillis().toULong(),
+                payload = payload,
+                signature = null,
+                ttl = MAX_TTL
+            )
+            NetworkMetricsManager.registerSendTimestamp(recipientPeerID,messageID)
+            connectionManager.broadcastPacket(RoutedPacket(packet))
+            Log.d(TAG, "📤 Sent ping packet to $recipientPeerID")
         }
     }
     
+    /**
+     * Send raw audio frame as AUDIO packet. If recipientPeerID is provided and isPrivate==true,
+     * send as private (unicast) packet; otherwise broadcast.
+     * NOTE: This sends unencrypted raw Opus frames as requested (no Noise encryption).
+     */
+    fun sendAudioFrame(recipientPeerID: String?, payload: ByteArray, isPrivate: Boolean = false) {
+        if (payload.isEmpty()) return
+        serviceScope.launch {
+            try {
+                val packet = if (isPrivate && !recipientPeerID.isNullOrEmpty()) {
+                    BitchatPacket(
+                        version = 1u,
+                        type = MessageType.AUDIO.value,
+                        senderID = hexStringToByteArray(myPeerID),
+                        recipientID = hexStringToByteArray(recipientPeerID!!),
+                        timestamp = System.currentTimeMillis().toULong(),
+                        payload = payload,
+                        signature = null,
+                        ttl = com.bitchat.android.util.AppConstants.MESSAGE_TTL_HOPS
+                    )
+                } else {
+                    BitchatPacket(
+                        version = 1u,
+                        type = MessageType.AUDIO.value,
+                        senderID = hexStringToByteArray(myPeerID),
+                        recipientID = SpecialRecipients.BROADCAST,
+                        timestamp = System.currentTimeMillis().toULong(),
+                        payload = payload,
+                        signature = null,
+                        ttl = MAX_TTL
+                    )
+                }
+                val signed = signPacketBeforeBroadcast(packet)
+                // No signing or encryption per user instruction; broadcast/send raw
+                if (isPrivate && !recipientPeerID.isNullOrEmpty()) {
+                    connectionManager.sendPacketToPeer(recipientPeerID!!, signed)
+                } else {
+                    connectionManager.broadcastPacket(RoutedPacket(signed))
+                }
+            } catch (e: Exception) {
+                Log.e(TAG, "Failed to send audio frame: ${e.message}")
+            }
+        }
+    }
+
     /**
      * Send read receipt for a received private message - NEW NoisePayloadType implementation
      * Uses same encryption approach as iOS SimplifiedBluetoothService

@@ -11,6 +11,8 @@ import com.bitchat.android.util.toHexString
 import kotlinx.coroutines.*
 import java.sql.Timestamp
 import java.util.*
+import com.bitchat.android.rtc.AudioPlayer
+import com.bitchat.android.rtc.OpusWrapper
 
 /**
  * Handles processing of different message types
@@ -30,6 +32,8 @@ class MessageHandler(private val myPeerID: String, private val appContext: andro
     
     // Coroutines
     private val handlerScope = CoroutineScope(Dispatchers.IO + SupervisorJob())
+    // Audio player for incoming audio frames
+    private val audioPlayer = AudioPlayer(sampleRate = 48000, channels = 1)
 
     /**
      * Handle Noise encrypted transport message - SIMPLIFIED iOS-compatible version
@@ -454,54 +458,78 @@ class MessageHandler(private val myPeerID: String, private val appContext: andro
      * Handle (decrypted) private message addressed to us
      */
     private suspend fun handlePrivateMessage(packet: BitchatPacket, peerID: String) {
-        try {
-            // Verify signature if present
-            if (packet.signature != null && !delegate?.verifySignature(packet, peerID)!!) {
-                Log.w(TAG, "Invalid signature for private message from $peerID")
-                return
-            }
+         try {
+             // Verify signature if present
+             if (packet.signature != null && !delegate?.verifySignature(packet, peerID)!!) {
+                 Log.w(TAG, "Invalid signature for private message from $peerID")
+                 return
+             }
 
-            // Try file packet first (voice, image, etc.) and log outcome for FILE_TRANSFER
-            val isFileTransfer = com.bitchat.android.protocol.MessageType.fromValue(packet.type) == com.bitchat.android.protocol.MessageType.FILE_TRANSFER
-            val file = com.bitchat.android.model.BitchatFilePacket.decode(packet.payload)
-            if (file != null) {
-                if (isFileTransfer) {
-                    Log.d(TAG, "📥 FILE_TRANSFER decode success (private): name='${file.fileName}', size=${file.fileSize}, mime='${file.mimeType}', from=${peerID.take(8)}")
-                }
-                val savedPath = com.bitchat.android.features.file.FileUtils.saveIncomingFile(appContext, file)
-                val message = BitchatMessage(
-                    id = java.util.UUID.randomUUID().toString().uppercase(),
-                    sender = delegate?.getPeerNickname(peerID) ?: "unknown",
-                    content = savedPath,
-                    type = com.bitchat.android.features.file.FileUtils.messageTypeForMime(file.mimeType),
-                    senderPeerID = peerID,
-                    timestamp = Date(packet.timestamp.toLong()),
-                    isPrivate = true,
-                    recipientNickname = delegate?.getMyNickname()
-                )
-                Log.d(TAG, "📄 Saved incoming file to $savedPath")
-                delegate?.onMessageReceived(message)
-                return
-            } else if (isFileTransfer) {
-                Log.w(TAG, "⚠️ FILE_TRANSFER decode failed (private) from ${peerID.take(8)} payloadSize=${packet.payload.size}")
-            }
+             // Try file packet first (voice, image, etc.) and log outcome for FILE_TRANSFER
+             val isFileTransfer = com.bitchat.android.protocol.MessageType.fromValue(packet.type) == com.bitchat.android.protocol.MessageType.FILE_TRANSFER
+             val file = com.bitchat.android.model.BitchatFilePacket.decode(packet.payload)
+             if (file != null) {
+                 if (isFileTransfer) {
+                     Log.d(TAG, "📥 FILE_TRANSFER decode success (private): name='${file.fileName}', size=${file.fileSize}, mime='${file.mimeType}', from=${peerID.take(8)}")
+                 }
+                 val savedPath = com.bitchat.android.features.file.FileUtils.saveIncomingFile(appContext, file)
+                 val message = BitchatMessage(
+                     id = java.util.UUID.randomUUID().toString().uppercase(),
+                     sender = delegate?.getPeerNickname(peerID) ?: "unknown",
+                     content = savedPath,
+                     type = com.bitchat.android.features.file.FileUtils.messageTypeForMime(file.mimeType),
+                     senderPeerID = peerID,
+                     timestamp = Date(packet.timestamp.toLong()),
+                     isPrivate = true,
+                     recipientNickname = delegate?.getMyNickname()
+                 )
+                 Log.d(TAG, "📄 Saved incoming file to $savedPath")
+                 delegate?.onMessageReceived(message)
+                 return
+             } else if (isFileTransfer) {
+                 Log.w(TAG, "⚠️ FILE_TRANSFER decode failed (private) from ${peerID.take(8)} payloadSize=${packet.payload.size}")
+             }
 
-            // Fallback: plain text
-            val message = BitchatMessage(
-                sender = delegate?.getPeerNickname(peerID) ?: "unknown",
-                content = String(packet.payload, Charsets.UTF_8),
-                senderPeerID = peerID,
-                timestamp = Date(packet.timestamp.toLong())
-            )
-            delegate?.onMessageReceived(message)
+             // AUDIO is handled by dedicated handleAudio routed path (see PacketProcessor -> delegate.handleAudio)
+         } catch (e: Exception) {
+             Log.e(TAG, "Failed to process private message from $peerID: ${e.message}")
+         }
+     }
 
-        } catch (e: Exception) {
-            Log.e(TAG, "Failed to process private message from $peerID: ${e.message}")
-        }
-    }
+     /**
+      * Handle a private AUDIO packet: decode Opus payload and play immediately (no buffering).
+      */
+     suspend fun handleAudio(routed: RoutedPacket) {
+         val packet = routed.packet
+         val peerID = routed.peerID ?: "unknown"
 
-    
-    
+         // Only accept audio addressed to us
+         val recipientID = packet.recipientID?.toHexString()
+         if (recipientID != myPeerID) {
+             Log.d(TAG, "AUDIO not for me (for $recipientID), ignoring")
+             return
+         }
+
+         try {
+             Log.d(TAG, "AUDIO packet size=${packet.payload.size} bytes from ${peerID.take(8)}")
+             // Log first few bytes (hex) for debugging
+             try {
+                 val preview = packet.payload.take(8).joinToString(" ") { "%02x".format(it) }
+                 Log.d(TAG, "AUDIO payload preview: $preview")
+             } catch (_: Exception) { }
+             val pcmShorts = OpusWrapper.decode(packet.payload, 48000, 1)
+             if (pcmShorts != null && pcmShorts.isNotEmpty()) {
+                 Log.d(TAG, "Decoded PCM samples=${pcmShorts.size} for ${peerID.take(8)}; first=${pcmShorts.take(8).joinToString(",")}")
+                 audioPlayer.playPcm(pcmShorts)
+                 Log.d(TAG, "Played private audio frame from ${peerID.take(8)}")
+             } else {
+                 Log.w(TAG, "Decoded audio empty from ${peerID.take(8)}")
+             }
+         } catch (e: Exception) {
+             Log.e(TAG, "Failed to decode/play private audio from $peerID: ${e.message}")
+         }
+     }
+
     /**
      * Handle leave message
      */

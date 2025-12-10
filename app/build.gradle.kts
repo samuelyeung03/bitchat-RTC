@@ -16,6 +16,11 @@ android {
         versionCode = 26
         versionName = "1.5.1"
 
+        // Build only for arm64-v8a (we provide a matching prebuilt libopus for arm64)
+        ndk {
+            abiFilters += "arm64-v8a"
+        }
+
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
         vectorDrawables {
             useSupportLibrary = true
@@ -48,6 +53,11 @@ android {
     }
     buildFeatures {
         compose = true
+    }
+    externalNativeBuild {
+        cmake {
+            path = file("src/main/cpp/CMakeLists.txt")
+        }
     }
     packaging {
         resources {
@@ -106,10 +116,18 @@ dependencies {
     
     // EXIF orientation handling for images
     implementation("androidx.exifinterface:exifinterface:1.3.7")
-    
+
+    // RTC codec: using prebuilt libopus provided via CMake under src/main/cpp; no external dependency
     // Testing
     testImplementation(libs.bundles.testing)
     androidTestImplementation(platform(libs.androidx.compose.bom))
     androidTestImplementation(libs.bundles.compose.testing)
     debugImplementation(libs.androidx.compose.ui.tooling)
+}
+
+// Configure Kotlin compiler options using the Kotlin DSL compilerOptions (Kotlin Gradle plugin 1.9+)
+kotlin {
+    compilerOptions {
+        jvmTarget.set(org.jetbrains.kotlin.gradle.dsl.JvmTarget.JVM_1_8)
+    }
 }
