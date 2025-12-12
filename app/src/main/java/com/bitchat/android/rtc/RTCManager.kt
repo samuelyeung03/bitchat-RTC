@@ -34,7 +34,7 @@ class RTCManager(
     private val context: Context? = null,
     private val sampleRate: Int = 48000,
     private val channels: Int = 1,
-    private val bitrate: Int = 36000 // use a very low default bitrate (6 kbps) to minimize bandwidth
+    private val bitrate: Int = 36000 // use a low default bitrate (36 kbps) to minimize bandwidth
 ) {
     companion object {
         private const val TAG = "RTCManager"
@@ -48,6 +48,9 @@ class RTCManager(
     private var recordingJob: Job? = null
     private val scope = CoroutineScope(Dispatchers.IO + SupervisorJob())
     private var encoderPtr: Long = 0L
+
+    // Add 16-bit sequence counter for outgoing audio packets
+    private var seqCounter: Int = 0
 
     // Keep an optional reference to BluetoothMeshService when constructed that way
     private var meshServiceRef: BluetoothMeshService? = null
@@ -172,16 +175,18 @@ class RTCManager(
                     val payload: ByteArray = encoded
                     Log.d(TAG, "Encoded frame ready: size=${payload.size} bytes")
 
-                    // Warn if encoded payload is unusually small (helps debug one-sample-like packets)
-                    if (payload.size <= 4) {
-                        Log.w(TAG, "Encoded payload very small (<=4 bytes). Consider checking encoder config or increasing frame size.")
-                    }
-
-                    // Hand off encoded frame to mesh service to build/send the packet.
+                    // Add 2-byte big-endian sequence number prefix to payload before sending
                     try {
                         meshServiceRef?.let { ms ->
-                            Log.d(TAG, "Handing encoded frame to meshService, recipientId=$recipientId")
-                            ms.sendVoice(recipientId, payload)
+                            val seq = seqCounter and 0xFFFF
+                            val prefixed = ByteArray(payload.size + 2)
+                            prefixed[0] = ((seq shr 8) and 0xFF).toByte()
+                            prefixed[1] = (seq and 0xFF).toByte()
+                            System.arraycopy(payload, 0, prefixed, 2, payload.size)
+                            ms.sendVoice(recipientId, prefixed)
+                            Log.d(TAG, "Sent voice packet seq=$seq size=${payload.size} totalSize=${prefixed.size}")
+                            // advance sequence with 16-bit wrap-around
+                            seqCounter = (seqCounter + 1) and 0xFFFF
                         } ?: run {
                             Log.w(TAG, "No BluetoothMeshService attached — call attachMeshService(meshService) before startCall")
                         }
