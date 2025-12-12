@@ -22,8 +22,8 @@ class AudioPlayer(private val sampleRate: Int = 48000, private val channels: Int
     private val bufferLock = Any()
 
     // Buffer targets in milliseconds
-    private var bufferMsTarget = 100        // warm-up target before draining
-    private var bufferMsMax = 500           // max buffer, drop oldest when exceeded
+    private var bufferMsTarget = 200        // warm-up target before draining (increased)
+    private var bufferMsMax = 700           // max buffer, drop oldest when exceeded (increased)
 
     @Volatile
     private var playbackThread: Thread? = null
@@ -50,14 +50,16 @@ class AudioPlayer(private val sampleRate: Int = 48000, private val channels: Int
 
         try {
             audioTrack?.play()
+            Log.d(TAG, "AudioTrack started: bufferSize=$bufferSize minBuf=$minBuf sampleRate=$sampleRate channels=$channels")
             startPlaybackThread()
         } catch (e: Exception) {
-            Log.e(TAG, "Failed to start AudioTrack: ${e.message}")
+            Log.e(TAG, "Failed to start AudioTrack: ${e.message}", e)
             audioTrack = null
         }
     }
 
     fun stop() {
+        Log.d(TAG, "Stopping AudioPlayer")
         try {
             // stop playback thread first
             stopPlaybackThread()
@@ -65,6 +67,7 @@ class AudioPlayer(private val sampleRate: Int = 48000, private val channels: Int
             audioTrack?.release()
         } catch (_: Exception) { }
         audioTrack = null
+        Log.d(TAG, "AudioPlayer stopped")
     }
 
     // Replace direct write with enqueueing into jitter buffer.
@@ -75,13 +78,36 @@ class AudioPlayer(private val sampleRate: Int = 48000, private val channels: Int
 
     // Public API to enqueue packets (optionally with seq/timestamp)
     fun enqueuePacket(pcm: ShortArray, seq: Int? = null, timestampMs: Long = System.currentTimeMillis()) {
+        if (pcm.isEmpty()) return
+
+        // Log if AudioPlayer not started (audioTrack == null) to help debug missing start() calls
+        if (audioTrack == null) {
+            start()
+            Log.d(TAG, "AudioPlayer auto-started in enqueuePacket")
+            if (audioTrack == null) {
+                Log.w(TAG, "AudioPlayer not started; cannot enqueue packet")
+                return
+            }
+        }
+
         val copied = pcm.copyOf() // ensure buffer ownership
         synchronized(bufferLock) {
+            val beforeMs = bufferDurationMsLocked()
             jitterBuffer.addLast(Packet(copied, timestampMs, seq))
-            // drop oldest packets if buffer size exceeds max ms
+            var dropped = 0
             while (bufferDurationMsLocked() > bufferMsMax && jitterBuffer.isNotEmpty()) {
                 jitterBuffer.removeFirst()
+                dropped++
             }
+            val afterMs = bufferDurationMsLocked()
+            Log.d(TAG, "Enqueued packet seq=${seq ?: "?"} ts=$timestampMs size=${copied.size} samples. bufferMs before=$beforeMs after=$afterMs dropped=$dropped")
+        }
+
+        // If AudioTrack exists but playback thread isn't running, try to start it automatically.
+        // This helps if start() was called for AudioTrack but the thread died or wasn't started.
+        if (audioTrack != null && (playbackThread == null || playbackThread?.isAlive != true)) {
+            Log.d(TAG, "AudioTrack present but playback thread not alive — attempting to start playback thread from enqueue")
+            startPlaybackThread()
         }
     }
 
@@ -96,7 +122,10 @@ class AudioPlayer(private val sampleRate: Int = 48000, private val channels: Int
     }
 
     private fun startPlaybackThread() {
-        if (playbackThread != null) return
+        // ensure thread isn't already alive
+        if (playbackThread != null && playbackThread?.isAlive == true) return
+
+        Log.d(TAG, "Creating playback thread")
         running = true
         playbackThread = thread(start = true, name = "AudioPlayer-JitterPlayback") {
             try {
@@ -104,8 +133,14 @@ class AudioPlayer(private val sampleRate: Int = 48000, private val channels: Int
                 while (running) {
                     val currentMs = synchronized(bufferLock) { bufferDurationMsLocked() }
                     if (currentMs >= bufferMsTarget) break
+                    Log.d(TAG, "Warm-up waiting: bufferMs=$currentMs target=${bufferMsTarget}")
                     Thread.sleep(10)
                 }
+                Log.d(TAG, "Warm-up complete, starting playback loop")
+
+                // scheduling token in nanoseconds for paced playback
+                // initialize to now + target so first write is paced
+                var scheduledNextNs = System.nanoTime() + bufferMsTarget * 1_000_000L
 
                 while (running) {
                     var pkt: Packet? = null
@@ -116,13 +151,45 @@ class AudioPlayer(private val sampleRate: Int = 48000, private val channels: Int
                     }
 
                     if (pkt != null) {
+                        // compute packet duration in nanoseconds
+                        val pktDurationMs = (pkt!!.pcm.size.toDouble() / channels.toDouble()) * 1000.0 / sampleRate.toDouble()
+                        val pktDurationNs = (pktDurationMs * 1_000_000.0).toLong()
+
+                        // write packet
                         try {
                             audioTrack?.write(pkt!!.pcm, 0, pkt!!.pcm.size)
+                            val bufMsLeft = synchronized(bufferLock) { bufferDurationMsLocked() }
+                            Log.d(TAG, "Wrote packet seq=${pkt!!.seq ?: "?"} ts=${pkt!!.timestampMs} size=${pkt!!.pcm.size} bufferMsLeft=$bufMsLeft pktMs=${"%.1f".format(pktDurationMs)}")
                         } catch (e: Exception) {
-                            Log.e(TAG, "Failed to write PCM to AudioTrack in playback thread: ${e.message}")
+                            Log.e(TAG, "Failed to write PCM to AudioTrack in playback thread: ${e.message}", e)
+                        }
+
+                        // After write, schedule next play relative to the actual post-write time
+                        val nowNsAfterWrite = System.nanoTime()
+                        scheduledNextNs = nowNsAfterWrite + pktDurationNs
+
+                        // compute sleep; only sleep when positive
+                        val sleepNs = scheduledNextNs - System.nanoTime()
+                        if (sleepNs > 0) {
+                            try {
+                                val sleepMs = sleepNs / 1_000_000L
+                                val sleepNanos = (sleepNs % 1_000_000L).toInt()
+                                Thread.sleep(sleepMs, sleepNanos)
+                            } catch (ie: InterruptedException) {
+                                // interruption handled by outer loop / shutdown
+                            }
+                        } else {
+                            val lagMs = (-sleepNs) / 1_000_000L
+                            // Only log meaningful lag to reduce noise
+                            if (lagMs > 5) {
+                                Log.w(TAG, "Playback lagging by ${lagMs}ms after write; skipping sleep to catch up")
+                            }
+                            // resync scheduled time to avoid large accumulated backlog
+                            scheduledNextNs = System.nanoTime()
                         }
                     } else {
                         // underrun: play a small chunk of silence and wait briefly
+                        Log.w(TAG, "Buffer underrun: writing silence")
                         val silenceMs = 20
                         val silenceLen = ((sampleRate * silenceMs * channels) / 1000)
                         val silence = ShortArray(silenceLen)
@@ -130,19 +197,27 @@ class AudioPlayer(private val sampleRate: Int = 48000, private val channels: Int
                             audioTrack?.write(silence, 0, silence.size)
                         } catch (_: Exception) { }
                         Thread.sleep(silenceMs.toLong())
+                        // reset scheduling after underrun so next packet will re-sync and warm up again
+                        scheduledNextNs = System.nanoTime() + bufferMsTarget * 1_000_000L
                     }
 
                     // If buffer grows too large while playing (e.g., network spikes), drop oldest
                     synchronized(bufferLock) {
+                        var dropped = 0
                         while (bufferDurationMsLocked() > bufferMsMax && jitterBuffer.isNotEmpty()) {
                             jitterBuffer.removeFirst()
+                            dropped++
+                        }
+                        if (dropped > 0) {
+                            val curMs = bufferDurationMsLocked()
+                            Log.w(TAG, "Dropped $dropped packets due to overflow. bufferMsNow=$curMs")
                         }
                     }
                 }
             } catch (e: InterruptedException) {
-                // thread interrupted during shutdown
+                Log.d(TAG, "Playback thread interrupted during shutdown")
             } catch (e: Exception) {
-                Log.e(TAG, "Playback thread exception: ${e.message}")
+                Log.e(TAG, "Playback thread exception", e)
             }
         }
     }
@@ -153,7 +228,9 @@ class AudioPlayer(private val sampleRate: Int = 48000, private val channels: Int
         playbackThread = null
         // clear buffer if desired (optional): keep or clear. We'll clear to avoid stale packets
         synchronized(bufferLock) {
+            val remaining = jitterBuffer.size
             jitterBuffer.clear()
+            Log.d(TAG, "Cleared jitter buffer, removed $remaining packets")
         }
     }
 }
