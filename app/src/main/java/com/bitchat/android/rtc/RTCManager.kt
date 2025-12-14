@@ -34,13 +34,11 @@ class RTCManager(
     private val context: Context? = null,
     private val sampleRate: Int = 48000,
     private val channels: Int = 1,
-    private val bitrate: Int = 36000 // use a very low default bitrate (6 kbps) to minimize bandwidth
+    private val bitrate: Int = 36000 // in bits per second
 ) {
     companion object {
         private const val TAG = "RTCManager"
-        // changed: use a larger Opus-friendly frame size (960 samples = 20ms @48k).
-        // 20ms frames are a common default and will produce larger encoded payloads
-        // compared to very small 2.5ms frames which may compress to only a few bytes.
+        // 60 ms frame size = 2880 samples @ 48kHz
         private const val FRAME_SAMPLES = 2880
         private const val BYTES_PER_SAMPLE = 2
     }
@@ -49,23 +47,14 @@ class RTCManager(
     private val scope = CoroutineScope(Dispatchers.IO + SupervisorJob())
     private var encoderPtr: Long = 0L
 
+    private var seqNumber: Int = 0
+
     // Keep an optional reference to BluetoothMeshService when constructed that way
     private var meshServiceRef: BluetoothMeshService? = null
 
     // Convenience constructor that takes BluetoothMeshService and uses it to send encoded frames
     constructor(context: Context? = null, meshService: BluetoothMeshService, sampleRate: Int = 48000, channels: Int = 1, bitrate: Int = 6000) : this(context, sampleRate, channels, bitrate) {
         this.meshServiceRef = meshService
-    }
-
-    // New: allow attaching/detaching mesh service at runtime
-    fun attachMeshService(meshService: BluetoothMeshService) {
-        meshServiceRef = meshService
-        Log.d(TAG, "attachMeshService: attached mesh service")
-    }
-
-    fun detachMeshService() {
-        meshServiceRef = null
-        Log.d(TAG, "detachMeshService: detached mesh service")
     }
 
     // Helper: encode PCM via native Opus wrapper (returns opus packet bytes or null)
@@ -164,23 +153,21 @@ class RTCManager(
                         continue
                     }
 
-                    if (encoded.isEmpty()) {
-                        Log.w(TAG, "encodeOpus returned empty payload")
-                        continue
-                    }
+                    // Build payload with 2-byte sequence number prefixed (big-endian)
+                    val seq = seqNumber and 0xFFFF
+                    val payload = ByteArray(encoded.size + 2)
+                    payload[0] = ((seq shr 8) and 0xFF).toByte()
+                    payload[1] = (seq and 0xFF).toByte()
+                    System.arraycopy(encoded, 0, payload, 2, encoded.size)
+                    // increment and wrap sequence
+                    seqNumber = (seq + 1) and 0xFFFF
 
-                    val payload: ByteArray = encoded
-                    Log.d(TAG, "Encoded frame ready: size=${payload.size} bytes")
-
-                    // Warn if encoded payload is unusually small (helps debug one-sample-like packets)
-                    if (payload.size <= 4) {
-                        Log.w(TAG, "Encoded payload very small (<=4 bytes). Consider checking encoder config or increasing frame size.")
-                    }
+                    Log.d(TAG, "Encoded frame ready: seq=$seq size=${payload.size} bytes")
 
                     // Hand off encoded frame to mesh service to build/send the packet.
                     try {
                         meshServiceRef?.let { ms ->
-                            Log.d(TAG, "Handing encoded frame to meshService, recipientId=$recipientId")
+                            Log.d(TAG, "Handing encoded frame to meshService, recipientId=$recipientId seq=$seq")
                             ms.sendVoice(recipientId, payload)
                         } ?: run {
                             Log.w(TAG, "No BluetoothMeshService attached — call attachMeshService(meshService) before startCall")
