@@ -6,7 +6,6 @@ import com.bitchat.android.model.IdentityAnnouncement
 import com.bitchat.android.model.RoutedPacket
 import com.bitchat.android.protocol.BitchatPacket
 import com.bitchat.android.protocol.MessageType
-import com.bitchat.android.ui.debug.DebugMessage
 import com.bitchat.android.util.toHexString
 import kotlinx.coroutines.*
 import java.sql.Timestamp
@@ -19,7 +18,6 @@ import com.bitchat.android.rtc.OpusWrapper
  * Extracted from BluetoothMeshService for better separation of concerns
  */
 class MessageHandler(private val myPeerID: String, private val appContext: android.content.Context) {
-    private val debugManager by lazy { try { com.bitchat.android.ui.debug.DebugSettingsManager.getInstance() } catch (e: Exception) { null } }
     companion object {
         private const val TAG = "MessageHandler"
     }
@@ -489,8 +487,6 @@ class MessageHandler(private val myPeerID: String, private val appContext: andro
              } else if (isFileTransfer) {
                  Log.w(TAG, "⚠️ FILE_TRANSFER decode failed (private) from ${peerID.take(8)} payloadSize=${packet.payload.size}")
              }
-
-             // AUDIO is handled by dedicated handleAudio routed path (see PacketProcessor -> delegate.handleAudio)
          } catch (e: Exception) {
              Log.e(TAG, "Failed to process private message from $peerID: ${e.message}")
          }
@@ -509,25 +505,7 @@ class MessageHandler(private val myPeerID: String, private val appContext: andro
              Log.d(TAG, "AUDIO not for me (for $recipientID), ignoring")
              return
          }
-
-         try {
-             Log.d(TAG, "AUDIO packet size=${packet.payload.size} bytes from ${peerID.take(8)}")
-             // Log first few bytes (hex) for debugging
-             try {
-                 val preview = packet.payload.take(8).joinToString(" ") { "%02x".format(it) }
-                 Log.d(TAG, "AUDIO payload preview: $preview")
-             } catch (_: Exception) { }
-             val pcmShorts = OpusWrapper.decode(packet.payload, 48000, 1)
-             if (pcmShorts != null && pcmShorts.isNotEmpty()) {
-                 Log.d(TAG, "Decoded PCM samples=${pcmShorts.size} for ${peerID.take(8)}; first=${pcmShorts.take(8).joinToString(",")}")
-                 audioPlayer.playPcm(pcmShorts)
-                 Log.d(TAG, "Played private audio frame from ${peerID.take(8)}")
-             } else {
-                 Log.w(TAG, "Decoded audio empty from ${peerID.take(8)}")
-             }
-         } catch (e: Exception) {
-             Log.e(TAG, "Failed to decode/play private audio from $peerID: ${e.message}")
-         }
+         audioPlayer.enqueuePacket(packet.payload)
      }
 
     /**

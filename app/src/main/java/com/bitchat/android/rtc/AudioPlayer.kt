@@ -2,7 +2,6 @@ package com.bitchat.android.rtc
 
 import android.media.AudioAttributes
 import android.media.AudioFormat
-import android.media.AudioManager
 import android.media.AudioTrack
 import android.util.Log
 import kotlin.concurrent.thread
@@ -16,7 +15,9 @@ class AudioPlayer(private val sampleRate: Int = 48000, private val channels: Int
     private var audioTrack: AudioTrack? = null
 
     // Add jitter buffer related fields
-    private data class Packet(val pcm: ShortArray, val timestampMs: Long, val seq: Int?)
+    // Use a regular class instead of data class to avoid array equals/hashCode warnings for ShortArray
+    // timestampMs was unused — removed to silence warnings
+    private class Packet(val pcm: ShortArray, val seq: Int?)
 
     private val jitterBuffer = ArrayDeque<Packet>()
     private val bufferLock = Any()
@@ -31,6 +32,9 @@ class AudioPlayer(private val sampleRate: Int = 48000, private val channels: Int
     @Volatile
     private var running = false
 
+    // maximum decoded samples to request from Opus decoder
+    private val maxSamples = 5760
+
     fun start() {
         if (audioTrack != null) return
         val channelConfig = if (channels == 1) AudioFormat.CHANNEL_OUT_MONO else AudioFormat.CHANNEL_OUT_STEREO
@@ -42,7 +46,8 @@ class AudioPlayer(private val sampleRate: Int = 48000, private val channels: Int
         val bufferSize = max(minBuf, bytesFor100Ms)
 
         audioTrack = AudioTrack.Builder()
-            .setAudioAttributes(AudioAttributes.Builder().setUsage(AudioAttributes.USAGE_VOICE_COMMUNICATION).setContentType(AudioAttributes.CONTENT_TYPE_SPEECH).build())
+            // Use MEDIA usage to route to speaker by default (voice communication may route to earpiece/SCO)
+            .setAudioAttributes(AudioAttributes.Builder().setUsage(AudioAttributes.USAGE_MEDIA).setContentType(AudioAttributes.CONTENT_TYPE_MUSIC).build())
             .setAudioFormat(AudioFormat.Builder().setEncoding(AudioFormat.ENCODING_PCM_16BIT).setSampleRate(sampleRate).setChannelMask(channelConfig).build())
             .setBufferSizeInBytes(bufferSize)
             .setTransferMode(AudioTrack.MODE_STREAM)
@@ -50,6 +55,12 @@ class AudioPlayer(private val sampleRate: Int = 48000, private val channels: Int
 
         try {
             audioTrack?.play()
+            Log.d(TAG, "AudioTrack started (sampleRate=$sampleRate channels=$channels bufferSize=$bufferSize)")
+            try {
+                val state = audioTrack?.state
+                val playState = audioTrack?.playState
+                Log.d(TAG, "AudioTrack state=$state playState=$playState")
+            } catch (_: Exception) { }
             startPlaybackThread()
         } catch (e: Exception) {
             Log.e(TAG, "Failed to start AudioTrack: ${e.message}")
@@ -67,20 +78,40 @@ class AudioPlayer(private val sampleRate: Int = 48000, private val channels: Int
         audioTrack = null
     }
 
-    // Replace direct write with enqueueing into jitter buffer.
-    fun playPcm(pcm: ShortArray) {
-        if (pcm.isEmpty()) return
-        enqueuePacket(pcm)
-    }
 
-    // Public API to enqueue packets (optionally with seq/timestamp)
-    fun enqueuePacket(pcm: ShortArray, seq: Int? = null, timestampMs: Long = System.currentTimeMillis()) {
-        val copied = pcm.copyOf() // ensure buffer ownership
+    // New: accept an Opus-encoded frame, decode it and forward to PCM enqueue
+    fun enqueuePacket(payload: ByteArray) {
+        if (payload.isEmpty()) return
+
+        if (payload.size < 2) {
+            Log.w(TAG, "Received payload too short to contain seq header, dropping")
+            return
+        }
+
+        // Extract 16-bit sequence number (big-endian) from first two bytes
+        val seq = ((payload[0].toInt() and 0xFF) shl 8) or (payload[1].toInt() and 0xFF)
+        val data = if (payload.size > 2) payload.copyOfRange(2, payload.size) else ByteArray(0)
+
+        if (audioTrack == null) start ()
+
+        try {
+            val decoded = OpusWrapper.decode(data, sampleRate, channels)
+            // forward decoded PCM to jitter buffer with seq
+            if (decoded!= null){
+                enqueuePcm(decoded, seq)
+            }
+
+        } catch (e: Exception) {
+            Log.e(TAG, "Failed to decode Opus packet for seq=$seq: ${e.message}")
+        }
+    }
+    private fun enqueuePcm(pcm: ShortArray, seq: Int?) {
         synchronized(bufferLock) {
-            jitterBuffer.addLast(Packet(copied, timestampMs, seq))
-            // drop oldest packets if buffer size exceeds max ms
-            while (bufferDurationMsLocked() > bufferMsMax && jitterBuffer.isNotEmpty()) {
-                jitterBuffer.removeFirst()
+            jitterBuffer.addLast(Packet(pcm, seq))
+            // If buffer is over max duration, drop oldest packets until under limit
+            while (jitterBuffer.isNotEmpty() && bufferDurationMsLocked() > bufferMsMax) {
+                val dropped = jitterBuffer.removeFirst()
+                Log.w(TAG, "Dropping old packet seq=${dropped.seq} to keep jitter buffer <= ${bufferMsMax}ms")
             }
         }
     }
@@ -100,11 +131,14 @@ class AudioPlayer(private val sampleRate: Int = 48000, private val channels: Int
         running = true
         playbackThread = thread(start = true, name = "AudioPlayer-JitterPlayback") {
             try {
-                // Wait for initial warm-up (bufferMsTarget) or until stopped
+                // Wait for initial warm-up (bufferMsTarget) or until a short max wait to avoid never-starting when only small packets arrive
+                var waited = 0
+                val maxWarmMs = 300
                 while (running) {
                     val currentMs = synchronized(bufferLock) { bufferDurationMsLocked() }
-                    if (currentMs >= bufferMsTarget) break
+                    if (currentMs >= bufferMsTarget || currentMs > 0 || waited >= maxWarmMs) break
                     Thread.sleep(10)
+                    waited += 10
                 }
 
                 while (running) {
@@ -116,22 +150,26 @@ class AudioPlayer(private val sampleRate: Int = 48000, private val channels: Int
                     }
 
                     if (pkt != null) {
+                        // capture local non-null reference to avoid redundant !! and help compiler
+                        val p = pkt
                         try {
-                            audioTrack?.write(pkt!!.pcm, 0, pkt!!.pcm.size)
+                            if (audioTrack?.playState != AudioTrack.PLAYSTATE_PLAYING) {
+                                Log.w(TAG, "AudioTrack not playing (playState=${audioTrack?.playState}), attempting to play()")
+                                try { audioTrack?.play() } catch (_: Exception) { }
+                            }
+                            val written = audioTrack?.write(p.pcm, 0, p.pcm.size) ?: -1
+                            if (written <= 0) {
+                                Log.w(TAG, "AudioTrack.write returned $written for requested=${p.pcm.size} for seq=${p.seq}")
+                            } else {
+                                Log.d(TAG, "Wrote audio samples=$written (requested=${p.pcm.size}) for seq=${p.seq}")
+                            }
                         } catch (e: Exception) {
                             Log.e(TAG, "Failed to write PCM to AudioTrack in playback thread: ${e.message}")
                         }
                     } else {
-                        // underrun: play a small chunk of silence and wait briefly
-                        val silenceMs = 20
-                        val silenceLen = ((sampleRate * silenceMs * channels) / 1000)
-                        val silence = ShortArray(silenceLen)
-                        try {
-                            audioTrack?.write(silence, 0, silence.size)
-                        } catch (_: Exception) { }
-                        Thread.sleep(silenceMs.toLong())
+                        // buffer empty, sleep briefly to avoid busy loop
+                        Thread.sleep(10)
                     }
-
                     // If buffer grows too large while playing (e.g., network spikes), drop oldest
                     synchronized(bufferLock) {
                         while (bufferDurationMsLocked() > bufferMsMax && jitterBuffer.isNotEmpty()) {
@@ -139,8 +177,9 @@ class AudioPlayer(private val sampleRate: Int = 48000, private val channels: Int
                         }
                     }
                 }
-            } catch (e: InterruptedException) {
-                // thread interrupted during shutdown
+            } catch (_: InterruptedException) {
+                // restore interrupt status and exit
+                Thread.currentThread().interrupt()
             } catch (e: Exception) {
                 Log.e(TAG, "Playback thread exception: ${e.message}")
             }
