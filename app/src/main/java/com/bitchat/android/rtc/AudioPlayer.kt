@@ -17,7 +17,7 @@ class AudioPlayer(private val sampleRate: Int = 48000, private val channels: Int
     // Add jitter buffer related fields
     // Use a regular class instead of data class to avoid array equals/hashCode warnings for ShortArray
     // timestampMs was unused — removed to silence warnings
-    private class Packet(val pcm: ShortArray, val seq: Int?)
+    private class Packet(val pcm: ShortArray, val seq: Int)
 
     private val jitterBuffer = ArrayDeque<Packet>()
     private val bufferLock = Any()
@@ -105,10 +105,63 @@ class AudioPlayer(private val sampleRate: Int = 48000, private val channels: Int
             Log.e(TAG, "Failed to decode Opus packet for seq=$seq: ${e.message}")
         }
     }
-    private fun enqueuePcm(pcm: ShortArray, seq: Int?) {
+
+    // Simplified: assume seq is never null. Check last first; if not newer, scan from end to insert.
+    private fun enqueuePcm(pcm: ShortArray, seq: Int) {
         synchronized(bufferLock) {
-            jitterBuffer.addLast(Packet(pcm, seq))
-            // If buffer is over max duration, drop oldest packets until under limit
+            val newPkt = Packet(pcm, seq)
+
+            // Empty buffer -> just add
+            if (jitterBuffer.isEmpty()) {
+                jitterBuffer.addLast(newPkt)
+                return
+            }
+
+            val lastSeq = jitterBuffer.last().seq and 0xFFFF
+            val expected = ((lastSeq + 1) and 0xFFFF)
+
+            // If exactly the expected next sequence number -> append (fast path)
+            if (seq == expected) {
+                jitterBuffer.addLast(newPkt)
+            } else {
+                // unsigned distance from last to seq
+                val diffFromLast = (seq - lastSeq) and 0xFFFF
+
+                if (diffFromLast in 1 until 0x8000) {
+                    // seq is newer than last (but not contiguous). Append to end.
+                    jitterBuffer.addLast(newPkt)
+                } else {
+                    // Out-of-order or too-old packet: find insertion point by scanning from end.
+                    val list = jitterBuffer.toMutableList()
+                    var insertAt = -1
+                    for (i in list.indices.reversed()) {
+                        val curSeq = list[i].seq and 0xFFFF
+                        if (curSeq == seq) {
+                            // Duplicate -> drop
+                            Log.w(TAG, "Dropping duplicate packet seq=$seq")
+                            return
+                        }
+                        val diff = (seq - curSeq) and 0xFFFF
+                        if (diff in 1 until 0x8000) {
+                            // new seq is newer than list[i], so insert after it
+                            insertAt = i + 1
+                            break
+                        }
+                    }
+
+                    if (insertAt == -1) {
+                        // too old compared to all entries -> drop
+                        Log.w(TAG, "Dropping too old packet seq=$seq")
+                        return
+                    }
+
+                    list.add(insertAt, newPkt)
+                    jitterBuffer.clear()
+                    jitterBuffer.addAll(list)
+                }
+            }
+
+            // Trim buffer to max duration if necessary
             while (jitterBuffer.isNotEmpty() && bufferDurationMsLocked() > bufferMsMax) {
                 val dropped = jitterBuffer.removeFirst()
                 Log.w(TAG, "Dropping old packet seq=${dropped.seq} to keep jitter buffer <= ${bufferMsMax}ms")
@@ -168,7 +221,8 @@ class AudioPlayer(private val sampleRate: Int = 48000, private val channels: Int
                         }
                     } else {
                         // buffer empty, sleep briefly to avoid busy loop
-                        Thread.sleep(10)
+                        Log.d(TAG,"Buffer underrunning")
+                        Thread.sleep(60)
                     }
                     // If buffer grows too large while playing (e.g., network spikes), drop oldest
                     synchronized(bufferLock) {
@@ -196,3 +250,4 @@ class AudioPlayer(private val sampleRate: Int = 48000, private val channels: Int
         }
     }
 }
+
