@@ -23,8 +23,11 @@ class AudioPlayer(private val sampleRate: Int = 48000, private val channels: Int
     private val bufferLock = Any()
 
     // Buffer targets in milliseconds
-    private var bufferMsTarget = 100        // warm-up target before draining
-    private var bufferMsMax = 500           // max buffer, drop oldest when exceeded
+    private var bufferMsTarget = 300        // warm-up target before draining
+    private var bufferMsMax = 600           // max buffer, drop oldest when exceeded
+
+    private val timeout = 3000
+    private var timeoutCounter = 0
 
     @Volatile
     private var playbackThread: Thread? = null
@@ -185,13 +188,12 @@ class AudioPlayer(private val sampleRate: Int = 48000, private val channels: Int
         playbackThread = thread(start = true, name = "AudioPlayer-JitterPlayback") {
             try {
                 // Wait for initial warm-up (bufferMsTarget) or until a short max wait to avoid never-starting when only small packets arrive
-                var waited = 0
-                val maxWarmMs = 300
                 while (running) {
                     val currentMs = synchronized(bufferLock) { bufferDurationMsLocked() }
-                    if (currentMs >= bufferMsTarget || currentMs > 0 || waited >= maxWarmMs) break
-                    Thread.sleep(10)
-                    waited += 10
+                    if (currentMs >= bufferMsTarget){
+                        break
+                    }
+                    Thread.sleep(60)
                 }
 
                 while (running) {
@@ -200,35 +202,35 @@ class AudioPlayer(private val sampleRate: Int = 48000, private val channels: Int
                         if (jitterBuffer.isNotEmpty()) {
                             pkt = jitterBuffer.removeFirst()
                         }
-                    }
-
-                    if (pkt != null) {
-                        // capture local non-null reference to avoid redundant !! and help compiler
-                        val p = pkt
-                        try {
-                            if (audioTrack?.playState != AudioTrack.PLAYSTATE_PLAYING) {
-                                Log.w(TAG, "AudioTrack not playing (playState=${audioTrack?.playState}), attempting to play()")
-                                try { audioTrack?.play() } catch (_: Exception) { }
-                            }
-                            val written = audioTrack?.write(p.pcm, 0, p.pcm.size) ?: -1
-                            if (written <= 0) {
-                                Log.w(TAG, "AudioTrack.write returned $written for requested=${p.pcm.size} for seq=${p.seq}")
-                            } else {
-                                Log.d(TAG, "Wrote audio samples=$written (requested=${p.pcm.size}) for seq=${p.seq}")
-                            }
-                        } catch (e: Exception) {
-                            Log.e(TAG, "Failed to write PCM to AudioTrack in playback thread: ${e.message}")
+                        val remainingBufferMs = bufferDurationMsLocked()
+                        Log.d(TAG,"$remainingBufferMs ms left")
+                        while (remainingBufferMs > bufferMsMax) {
+                            pkt = jitterBuffer.removeFirst()
+                            Log.d(TAG,"Removing too old packet seq=${pkt.seq}")
                         }
-                    } else {
-                        // buffer empty, sleep briefly to avoid busy loop
-                        Log.d(TAG,"Buffer underrunning")
+                    }
+                    if (pkt == null) {
+                        if (timeoutCounter >= timeout) stopPlaybackThread()
+                        timeoutCounter += 60
                         Thread.sleep(60)
+                        continue
                     }
-                    // If buffer grows too large while playing (e.g., network spikes), drop oldest
-                    synchronized(bufferLock) {
-                        while (bufferDurationMsLocked() > bufferMsMax && jitterBuffer.isNotEmpty()) {
-                            jitterBuffer.removeFirst()
+                    // capture local non-null reference to avoid redundant !! and help compiler
+                    timeoutCounter = 0
+                    val p = pkt
+                    try {
+                        if (audioTrack?.playState != AudioTrack.PLAYSTATE_PLAYING) {
+                            Log.w(TAG, "AudioTrack not playing (playState=${audioTrack?.playState}), attempting to play()")
+                            try { audioTrack?.play() } catch (_: Exception) { }
                         }
+                        val written = audioTrack?.write(p.pcm, 0, p.pcm.size) ?: -1
+                        if (written <= 0) {
+                            Log.w(TAG, "AudioTrack.write returned $written for requested=${p.pcm.size} for seq=${p.seq}")
+                        } else {
+                            Log.d(TAG, "Wrote audio samples=$written (requested=${p.pcm.size}) for seq=${p.seq}")
+                        }
+                    } catch (e: Exception) {
+                        Log.e(TAG, "Failed to write PCM to AudioTrack in playback thread: ${e.message}")
                     }
                 }
             } catch (_: InterruptedException) {
