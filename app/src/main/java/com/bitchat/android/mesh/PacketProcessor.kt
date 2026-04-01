@@ -161,6 +161,8 @@ class PacketProcessor(private val myPeerID: String) {
                         MessageType.VOICE -> handleAudio(routed)
                         MessageType.VOICE_ACK -> handleVoiceAck(routed)
                         MessageType.VOICE_INVITE -> handleVoiceInvite(routed)
+                        MessageType.VIDEO -> handleVideo(routed)
+                        MessageType.VIDEO_ACK -> handleVideoAck(routed)
                         else -> {
                             validPacket = false
                             Log.w(TAG, "Unknown message type: ${packet.type}")
@@ -288,6 +290,22 @@ class PacketProcessor(private val myPeerID: String) {
         }
     }
 
+    private suspend fun handleVideo(routed: RoutedPacket) {
+        val peerID = routed.peerID ?: "unknown"
+        Log.d(TAG, "Processing VIDEO (private) from ${formatPeerForLog(peerID)}")
+        try {
+            delegate?.handleVideo(routed)
+        } catch (e: Exception) {
+            Log.e(TAG, "Failed to process VIDEO from ${formatPeerForLog(peerID)}: ${e.message}")
+        }
+    }
+
+    private suspend fun handleVideoAck(routed: RoutedPacket) {
+        val peerID = routed.peerID ?: "unknown"
+        Log.d(TAG, "Processing VIDEO_ACK from ${formatPeerForLog(peerID)}")
+        delegate?.onVideoAckReceived(routed)
+    }
+
     private suspend fun handleVoiceAck(routed: RoutedPacket) {
         val peerID = routed.peerID ?: "unknown"
         Log.d(TAG, "Processing VOICE_ACK from ${formatPeerForLog(peerID)}")
@@ -371,7 +389,9 @@ interface PacketProcessorDelegate {
     fun handleRequestSync(routed: RoutedPacket)
     fun handleVoiceInvite(routed: RoutedPacket)
     fun onVoiceAckReceived(routed: RoutedPacket)
-    
+    fun handleVideo(routed: RoutedPacket)
+    fun onVideoAckReceived(routed: RoutedPacket)
+
     // Communication
     fun sendAnnouncementToPeer(peerID: String)
     fun sendCachedMessages(peerID: String)

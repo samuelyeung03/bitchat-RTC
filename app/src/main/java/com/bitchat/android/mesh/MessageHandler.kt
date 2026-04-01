@@ -519,6 +519,31 @@ class MessageHandler(private val myPeerID: String, private val appContext: andro
      }
 
     /**
+     * Handle a private VIDEO packet: forward NAL units to the DACE decoder via RTCConnectionManager.
+     */
+    suspend fun handleVideo(routed: RoutedPacket) {
+        val packet = routed.packet
+        val peerID = routed.peerID ?: "unknown"
+
+        val seq = if (packet.payload.size >= 2) {
+            ((packet.payload[0].toInt() and 0xFF) shl 8) or (packet.payload[1].toInt() and 0xFF)
+        } else { -1 }
+
+        Log.d(LATENCY_TAG, "🎬 handleVideo: from $peerID seq=$seq size=${packet.payload.size}")
+
+        val recipientID = packet.recipientID?.toHexString()
+        if (recipientID != myPeerID) {
+            Log.d(TAG, "VIDEO not for me (for $recipientID), ignoring")
+            return
+        }
+
+        val handled = delegate?.onVideoFrameReceived(peerID, packet) ?: false
+        if (!handled) {
+            Log.w(TAG, "No RTC manager available for video from $peerID")
+        }
+    }
+
+    /**
      * Handle leave message
      */
     suspend fun handleLeave(routed: RoutedPacket) {
@@ -666,4 +691,5 @@ interface MessageHandlerDelegate {
     fun onDeliveryAckReceived(messageID: String, peerID: String)
     fun onReadReceiptReceived(messageID: String, peerID: String)
     fun onAudioFrameReceived(peerID: String, packet: BitchatPacket): Boolean
+    fun onVideoFrameReceived(peerID: String, packet: BitchatPacket): Boolean
 }

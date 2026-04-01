@@ -10,10 +10,12 @@ import android.media.AudioRecord
 import android.os.Build
 import android.os.Process
 import android.util.Log
+import android.view.TextureView
 import androidx.core.content.ContextCompat
 import com.bitchat.android.util.AppConstants
 import com.bitchat.android.mesh.BluetoothMeshService
 import com.bitchat.android.protocol.BitchatPacket
+import com.bitchat.android.protocol.MessageType
 import com.bitchat.android.util.toHexString
 import kotlinx.coroutines.*
 import java.util.*
@@ -65,6 +67,15 @@ class RTCConnectionManager(
 
     // Keep an optional reference to BluetoothMeshService when constructed that way
     private var meshServiceRef: BluetoothMeshService? = null
+
+    // ── DACE video ────────────────────────────────────────────────────────────
+    private var videoEncoder: VideoEncoder? = null
+    private var videoDecoder: VideoDecoder? = null
+    private var videoInputDevice: VideoInputDevice? = null
+    private var videoOutputDevice: VideoOutputDevice? = null
+    private var videoCaptureJob: Job? = null
+    private var videoSeqNumber: Int = 0
+    private var videoFrameCount: Int = 0
 
     // Convenience constructor that takes BluetoothMeshService and uses it to send encoded frames
     constructor(
@@ -169,6 +180,7 @@ class RTCConnectionManager(
         stopReceivingAudio()
         audioEncoder?.release()
         audioEncoder = null
+        stopVideo()
         Log.d(TAG, "Encoder destroyed")
     }
 
@@ -337,6 +349,131 @@ class RTCConnectionManager(
             totalSamples += p.pcm.size
         }
         return ((totalSamples.toDouble() / channels) * 1000.0 / sampleRate).toInt()
+    }
+
+    // ── DACE video: start / stop ──────────────────────────────────────────────
+
+    /**
+     * Start DACE video capture and encoding.
+     *
+     * Requires CAMERA permission to be granted before calling.
+     *
+     * @param senderId    local peer ID (for packet header)
+     * @param recipientId remote peer ID, or null for broadcast
+     * @param remoteView  TextureView to render the decoded remote video onto;
+     *                    pass null to receive-only without display
+     */
+    fun startVideo(senderId: String, recipientId: String?, remoteView: TextureView? = null) {
+        if (context == null) {
+            Log.e(TAG, "startVideo: Context required for camera access")
+            return
+        }
+        if (ContextCompat.checkSelfPermission(context, Manifest.permission.CAMERA)
+            != PackageManager.PERMISSION_GRANTED) {
+            Log.e(TAG, "startVideo: CAMERA permission not granted")
+            return
+        }
+        if (videoCaptureJob != null) {
+            Log.d(TAG, "startVideo: already running, ignoring")
+            return
+        }
+
+        val width  = AppConstants.Dace.DEFAULT_WIDTH
+        val height = AppConstants.Dace.DEFAULT_HEIGHT
+        val fps    = AppConstants.Dace.DEFAULT_FPS
+
+        videoEncoder = DACEEncoder(
+            width          = width,
+            height         = height,
+            fps            = fps,
+            bitrate        = AppConstants.Dace.DEFAULT_BITRATE_BPS,
+            complexityLevel = AppConstants.Dace.COMPLEXITY_DEFAULT
+        )
+
+        videoDecoder = DACEDecoder(width, height)
+
+        remoteView?.let {
+            videoOutputDevice = VideoOutputDevice(it, width, height)
+        }
+
+        videoInputDevice = VideoInputDevice(context, width, height) { yuv420 ->
+            sendEncodedVideoFrame(yuv420, recipientId)
+        }
+
+        videoInputDevice!!.start()
+        Log.i(TAG, "DACE video started: ${width}x${height} @${fps}fps to ${recipientId ?: "BROADCAST"}")
+    }
+
+    fun stopVideo() {
+        videoCaptureJob?.cancel()
+        videoCaptureJob = null
+        videoInputDevice?.stop()
+        videoInputDevice = null
+        videoEncoder?.release()
+        videoEncoder = null
+        videoDecoder?.release()
+        videoDecoder = null
+        videoOutputDevice?.release()
+        videoOutputDevice = null
+        videoSeqNumber = 0
+        videoFrameCount = 0
+        Log.i(TAG, "DACE video stopped")
+    }
+
+    private fun sendEncodedVideoFrame(yuv420: ByteArray, recipientId: String?) {
+        val enc = videoEncoder ?: return
+        val seq = videoSeqNumber and 0xFFFF
+        videoFrameCount++
+
+        // Periodic keyframe every KEYFRAME_INTERVAL_FRAMES frames
+        val forceKey = (videoFrameCount % AppConstants.Dace.KEYFRAME_INTERVAL_FRAMES) == 1
+
+        val nalBytes = enc.encode(yuv420, forceKey) ?: return
+
+        // 2-byte sequence header + NAL data
+        val payload = ByteArray(nalBytes.size + 2)
+        payload[0] = ((seq shr 8) and 0xFF).toByte()
+        payload[1] = (seq and 0xFF).toByte()
+        System.arraycopy(nalBytes, 0, payload, 2, nalBytes.size)
+        videoSeqNumber = (seq + 1) and 0xFFFF
+
+        Log.d(LATENCY_TAG, "🎬 sendEncodedVideoFrame: seq=$seq nalBytes=${nalBytes.size}")
+
+        try {
+            meshServiceRef?.sendVideo(recipientId, payload)
+                ?: Log.w(TAG, "No BluetoothMeshService attached for video — call attachMeshService() first")
+        } catch (e: Exception) {
+            Log.w(TAG, "Failed to send video frame: ${e.message}")
+        }
+    }
+
+    /**
+     * Called by the mesh layer when a VIDEO packet arrives for this peer.
+     */
+    fun handleIncomingVideo(packet: BitchatPacket) {
+        val payload = packet.payload
+        if (payload.size < 2) {
+            Log.w(TAG, "handleIncomingVideo: payload too short, dropping")
+            return
+        }
+
+        val seq = ((payload[0].toInt() and 0xFF) shl 8) or (payload[1].toInt() and 0xFF)
+        val nalData = if (payload.size > 2) payload.copyOfRange(2, payload.size) else return
+
+        Log.d(LATENCY_TAG, "📹 handleIncomingVideo: seq=$seq nalBytes=${nalData.size}")
+
+        meshServiceRef?.sendVideoAck(packet.senderID.toHexString(), seq)
+
+        val dec = videoDecoder ?: return
+        val yuv420 = dec.decode(nalData) ?: return
+        videoOutputDevice?.renderFrame(yuv420)
+    }
+
+    fun handleVideoAck(packet: BitchatPacket) {
+        val payload = packet.payload
+        if (payload.size < 2) return
+        val seq = ((payload[0].toInt() and 0xFF) shl 8) or (payload[1].toInt() and 0xFF)
+        Log.d(LATENCY_TAG, "🎬 Received VIDEO_ACK for seq=$seq from ${packet.senderID.toHexString()}")
     }
 
     private fun startPlaybackLoopIfNeeded() {
