@@ -136,4 +136,31 @@ object AppConstants {
         const val JITTER_BUFFER_MAX_MS: Int = 240
         const val JITTER_BUFFER_MIN_MS: Int = 60
     }
+
+    /** Constants for DACE (Dynamic Adaptive Complexity Encoding) video codec. */
+    object Dace {
+        // Frame dimensions — QVGA is small enough for Bluetooth mesh bandwidth
+        const val DEFAULT_WIDTH: Int  = 320
+        const val DEFAULT_HEIGHT: Int = 240
+        const val DEFAULT_FPS: Int    = 15
+
+        // Bitrate budget.  Bluetooth LE practical throughput ~200 kbps shared
+        // with audio; video gets ~100 kbps leaving headroom for overhead.
+        const val DEFAULT_BITRATE_BPS: Int = 100_000
+        const val MIN_BITRATE_BPS: Int     = 30_000
+        const val MAX_BITRATE_BPS: Int     = 200_000
+
+        // DACE complexity levels (0 = lowest CPU / fastest encode,
+        // higher values trade CPU for quality — maps to dace_complexity_level)
+        const val COMPLEXITY_MIN: Int     = 0
+        const val COMPLEXITY_DEFAULT: Int = 2
+        const val COMPLEXITY_MAX: Int     = 5
+
+        // Force an IDR keyframe every N frames so late-joiners can sync
+        const val KEYFRAME_INTERVAL_FRAMES: Int = 30   // ~2 s at 15 fps
+
+        // Maximum encoded NAL packet size after fragmentation
+        // (same fragment budget as audio: 469 bytes per BLE packet)
+        const val MAX_NAL_FRAGMENT_BYTES: Int = 469
+    }
 }

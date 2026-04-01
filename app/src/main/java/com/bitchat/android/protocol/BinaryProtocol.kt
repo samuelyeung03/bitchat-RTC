@@ -13,9 +13,12 @@ enum class MessageType(val value: UByte) {
     ANNOUNCE(0x01u),
     MESSAGE(0x02u),  // All user messages (private and broadcast)
     LEAVE(0x03u),
-    VOICE(0x12u), // Audio packet type (used by RTCManager)
-    VOICE_ACK(0x13u), // ACK for voice packet
-    VOICE_INVITE(0x14u), // New: Invitation to start voice call (private invite)
+    VOICE(0x12u),         // Audio packet (Opus)
+    VOICE_ACK(0x13u),     // ACK for voice packet
+    VOICE_INVITE(0x14u),  // Invitation to start voice call
+    VIDEO(0x15u),         // Video frame packet (H.264 DACE NAL units)
+    VIDEO_ACK(0x16u),     // ACK for video packet
+    VIDEO_INVITE(0x17u),  // Invitation to start video call
     PING(0x4u),
     PONG(0x5u),
     NOISE_HANDSHAKE(0x10u),  // Noise handshake
