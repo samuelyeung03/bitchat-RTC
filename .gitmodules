@@ -1,0 +1,4 @@
+[submodule "app/src/main/cpp/x264"]
+	path = app/src/main/cpp/x264
+	url = https://github.com/samuelyeung03/x264.git
+	branch = DACE
