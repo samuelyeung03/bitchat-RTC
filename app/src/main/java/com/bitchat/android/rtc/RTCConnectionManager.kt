@@ -383,11 +383,11 @@ class RTCConnectionManager(
         val fps    = AppConstants.Dace.DEFAULT_FPS
 
         videoEncoder = DACEEncoder(
-            width          = width,
-            height         = height,
-            fps            = fps,
-            bitrate        = AppConstants.Dace.DEFAULT_BITRATE_BPS,
-            complexityLevel = AppConstants.Dace.COMPLEXITY_DEFAULT
+            width   = width,
+            height  = height,
+            fps     = fps,
+            bitrate = AppConstants.Dace.DEFAULT_BITRATE_BPS
+            // complexityLevel omitted → -1 (DACE auto mode)
         )
 
         videoDecoder = DACEDecoder(width, height)

@@ -21,6 +21,10 @@ struct DaceEncoderCtx {
 
 // ---------------------------------------------------------------------------
 // nativeCreateEncoder(width, height, fps, bitrate, complexityLevel) -> handle
+//
+// complexityLevel:
+//   -1  → DACE auto mode (self-regulates 0-9 based on frame encode time)
+//   0-9 → fixed level for testing / benchmarking specific quality points
 // ---------------------------------------------------------------------------
 extern "C"
 JNIEXPORT jlong JNICALL
@@ -55,10 +59,12 @@ Java_com_bitchat_android_rtc_DACEWrapper_nativeCreateEncoder(
     ctx->param.b_repeat_headers     = 1;  // SPS/PPS in every IDR
     ctx->param.b_annexb             = 1;
 
-    // DACE: dynamic adaptive complexity
-    ctx->param.i_threads = 1;              // single thread, deterministic latency
-    ctx->param.dace      = 1;             // enable DACE mode
-    ctx->param.dace_complexity_level = complexityLevel;  // 0=lowest .. N=highest
+    // DACE: enable adaptive complexity encoding
+    // complexity_level = -1 → auto (DACE self-regulates based on frame timing)
+    // complexity_level >= 0 → fixed level (for benchmarking CL0..CL9)
+    ctx->param.i_threads             = 1;
+    ctx->param.dace                  = 1;
+    ctx->param.dace_complexity_level = complexityLevel; // -1=auto, 0-9=fixed
 
     ctx->width  = width;
     ctx->height = height;
@@ -71,8 +77,9 @@ Java_com_bitchat_android_rtc_DACEWrapper_nativeCreateEncoder(
         return 0L;
     }
 
-    LOGI("DACE encoder created: %dx%d @%dfps %dbps complexity=%d",
-         width, height, fps, bitrate, complexityLevel);
+    const char* mode = (complexityLevel < 0) ? "auto" : "fixed";
+    LOGI("DACE encoder created: %dx%d @%dfps %dbps complexity=%s(%d)",
+         width, height, fps, bitrate, mode, complexityLevel);
     return reinterpret_cast<jlong>(ctx);
 }
 

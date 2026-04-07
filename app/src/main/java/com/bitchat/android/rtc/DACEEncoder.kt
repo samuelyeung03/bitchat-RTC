@@ -13,14 +13,18 @@ import android.util.Log
  * @param height           frame height in pixels (must be even)
  * @param fps              target frame rate
  * @param bitrate          target bitrate in bits/sec
- * @param complexityLevel  initial DACE complexity (0 = fastest/lowest quality)
+ * @param complexityLevel  DACE complexity override.
+ *   -1 (default) → auto mode: DACE self-regulates 0-9 based on frame
+ *                   encode time vs target frametime (production default).
+ *   0-9           → fixed level: useful for benchmarking specific CLs
+ *                   (e.g. DACEEncoder(..., complexityLevel = 3)).
  */
 class DACEEncoder(
     private val width: Int,
     private val height: Int,
     private val fps: Int,
     private val bitrate: Int,
-    complexityLevel: Int = 0
+    complexityLevel: Int = -1   // -1 = DACE auto mode
 ) : VideoEncoder {
 
     companion object {
@@ -34,7 +38,8 @@ class DACEEncoder(
         if (encoderHandle == 0L) {
             Log.e(TAG, "Failed to create DACE encoder ($width x $height @ $fps fps, $bitrate bps)")
         } else {
-            Log.i(TAG, "DACE encoder ready: ${width}x${height} @${fps}fps ${bitrate}bps cl=$complexityLevel")
+            val clDesc = if (complexityLevel < 0) "auto" else "fixed=$complexityLevel"
+            Log.i(TAG, "DACE encoder ready: ${width}x${height} @${fps}fps ${bitrate}bps cl=$clDesc")
         }
     }
 
