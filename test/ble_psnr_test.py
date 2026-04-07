@@ -93,18 +93,18 @@ def collect_logcat(serial, stop_evt, lines_out):
 
 # ── run one pass ──────────────────────────────────────────────────────────────
 
-def wait_for_ble_mesh(timeout=30):
-    """Block until both devices are peered (BluetoothMeshService is active)."""
+def wait_for_ble_peer(timeout=60):
+    """Block until Pi1 has Pi2 in its verified peer list."""
     deadline = time.time() + timeout
     while time.time() < deadline:
-        r = adb(SENDER_SERIAL, "shell", "logcat", "-d", "-s", "BluetoothMeshService",
-                timeout=5)
-        if "Sending broadcast announce" in r.stdout:
-            r2 = adb(RECEIVER_SERIAL, "shell", "logcat", "-d", "-s", "BluetoothMeshService",
-                     timeout=5)
-            if "Sending broadcast announce" in r2.stdout:
-                return True
-        time.sleep(2)
+        adb(SENDER_SERIAL, "shell", "logcat", "-c", timeout=5)
+        time.sleep(0.3)
+        adb_cmd(SENDER_SERIAL, "peers")
+        time.sleep(1)
+        r = adb(SENDER_SERIAL, "shell", "logcat", "-d", "-s", "ADB_CMD", timeout=5)
+        if RECEIVER_PEER in r.stdout:
+            return True
+        time.sleep(3)
     return False
 
 def run_pass(cl, duration, clock_delta):
@@ -255,10 +255,15 @@ def main():
         label = "auto" if cl == -1 else f"CL{cl}"
         print(f"\n[pass {label}]")
 
-        # Wait for BLE mesh to be stable before each pass (longer for later passes)
-        settle = 5 if i == 0 else 10
-        print(f"  settling {settle}s …")
-        time.sleep(settle)
+        # Ensure BLE peer is connected before each pass
+        print(f"  checking BLE peer …", end=" ", flush=True)
+        if not wait_for_ble_peer(timeout=45):
+            print(f"TIMEOUT — skipping {label}")
+            results[label] = {"n": 0, "lost": 0, "lat_us": _stat([]), "psnr": _stat([]),
+                               "enc_us": _stat([]), "nal_b": _stat([])}
+            continue
+        print("connected")
+        time.sleep(3)  # brief settle
 
         send_rows, recv_rows = run_pass(cl, args.duration, clock_delta)
         results[label] = analyse(send_rows, recv_rows, clock_delta)

@@ -96,6 +96,26 @@ adb -s 798f51f064cce0d1 install -r app/build/outputs/apk/debug/app-debug.apk
 adb -s f501a6221ec14252 install -r app/build/outputs/apk/debug/app-debug.apk
 ```
 
+## Test results (2026-04-08, BLE mesh, 320×240 @15fps, 100kbps)
+
+| Mode   | PSNR avg | Enc avg | NAL avg | Recv/254 |
+|--------|----------|---------|---------|----------|
+| auto   | 53.8 dB  | 22 ms   | 806 B   | ~9       |
+| CL0    | 52.0 dB  |  4 ms   | 825 B   | ~8       |
+| CL1    | 50.2 dB  |  5 ms   | 830 B   | ~16      |
+| CL2    | 52.6 dB  |  6 ms   | 830 B   | ~2       |
+| CL3    | 52.3 dB  |  7 ms   | 842 B   | 0        |
+| CL4    | 52.1 dB  | 13 ms   | 852 B   | ~7       |
+| CL5    | 53.3 dB  | 11 ms   | 842 B   | ~4       |
+
+**Key observations:**
+- PSNR 50-54 dB is **encoder-side** (x264 reconstructed vs input). BLE transport does not affect PSNR.
+- Encode time scales with CL as expected (CL0=4ms, CL5=11ms, auto=22ms).
+- **Packet loss ~97%** at 15fps — BLE mesh throughput (~1-2 KB/s video) can't sustain 15fps × 850B/frame.
+- Next: reduce to 5fps or use `set_complexity` mid-stream to get cleaner latency measurements.
+- Latency when received: 50-500ms (sparse, BLE congestion; δ≈-19ms between Pi1 and Pi2 clocks).
+- Script: `python3 test/ble_psnr_test.py --duration 20 --cls -1 0 1 2 3 4 5`
+
 ## User preferences
 - Do NOT use the TCP bench as a substitute for BLE-mesh testing
 - Commit after each meaningful change
