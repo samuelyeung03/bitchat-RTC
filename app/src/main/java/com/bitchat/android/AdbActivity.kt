@@ -10,10 +10,12 @@ import com.bitchat.android.mesh.BluetoothMeshService
  * Triggered via: adb shell am start -n com.bitchat.droid/.AdbActivity --es cmd <CMD> [extras]
  *
  * Commands:
- *   peer_id              — log local peer ID (tag ADB_CMD)
- *   peers                — log all connected peer IDs
- *   start_video  --es peer_id <hex>   — start video call to peer
- *   stop_video           — stop video call
+ *   peer_id                                 — log local peer ID (tag ADB_CMD)
+ *   peers                                   — log all connected peer IDs
+ *   start_video  --es peer_id <hex>         — start video (DACE auto)
+ *                [--ei cl <-1..9>]           — set fixed DACE CL (-1=auto)
+ *   stop_video                              — stop video call
+ *   set_complexity --ei cl <-1..9>          — change CL on running encoder
  */
 class AdbActivity : Activity() {
 
@@ -51,14 +53,21 @@ class AdbActivity : Activity() {
                 if (peerId.isNullOrBlank()) {
                     Log.e(TAG, "ERROR start_video requires --es peer_id <hex>")
                 } else {
-                    Log.i(TAG, "start_video peer=$peerId")
-                    ms.rtcConnectionManager.startVideo(ms.myPeerID, peerId)
+                    val cl = intent.getIntExtra("cl", -1)
+                    Log.i(TAG, "start_video peer=$peerId cl=$cl")
+                    ms.rtcConnectionManager.startVideo(ms.myPeerID, peerId, complexityLevel = cl)
                 }
             }
 
             "stop_video" -> {
                 Log.i(TAG, "stop_video")
                 ms.rtcConnectionManager.stopVideo()
+            }
+
+            "set_complexity" -> {
+                val cl = intent.getIntExtra("cl", -1)
+                Log.i(TAG, "set_complexity cl=$cl")
+                ms.rtcConnectionManager.setVideoComplexity(cl)
             }
 
             else -> Log.w(TAG, "UNKNOWN cmd=$cmd")

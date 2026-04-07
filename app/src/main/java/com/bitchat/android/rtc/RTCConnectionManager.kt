@@ -363,7 +363,7 @@ class RTCConnectionManager(
      * @param remoteView  TextureView to render the decoded remote video onto;
      *                    pass null to receive-only without display
      */
-    fun startVideo(senderId: String, recipientId: String?, remoteView: TextureView? = null) {
+    fun startVideo(senderId: String, recipientId: String?, remoteView: TextureView? = null, complexityLevel: Int = -1) {
         if (context == null) {
             Log.e(TAG, "startVideo: Context required for camera access")
             return
@@ -383,11 +383,11 @@ class RTCConnectionManager(
         val fps    = AppConstants.Dace.DEFAULT_FPS
 
         videoEncoder = DACEEncoder(
-            width   = width,
-            height  = height,
-            fps     = fps,
-            bitrate = AppConstants.Dace.DEFAULT_BITRATE_BPS
-            // complexityLevel omitted → -1 (DACE auto mode)
+            width           = width,
+            height          = height,
+            fps             = fps,
+            bitrate         = AppConstants.Dace.DEFAULT_BITRATE_BPS,
+            complexityLevel = complexityLevel
         )
 
         videoDecoder = DACEDecoder(width, height)
@@ -402,6 +402,10 @@ class RTCConnectionManager(
 
         videoInputDevice!!.start()
         Log.i(TAG, "DACE video started: ${width}x${height} @${fps}fps to ${recipientId ?: "BROADCAST"}")
+    }
+
+    fun setVideoComplexity(level: Int) {
+        videoEncoder?.setComplexityLevel(level)
     }
 
     fun stopVideo() {
@@ -437,7 +441,13 @@ class RTCConnectionManager(
         System.arraycopy(nalBytes, 0, payload, 2, nalBytes.size)
         videoSeqNumber = (seq + 1) and 0xFFFF
 
-        Log.d(LATENCY_TAG, "🎬 sendEncodedVideoFrame: seq=$seq nalBytes=${nalBytes.size}")
+        // Collect PSNR + timing from DACEEncoder if available
+        val daceEnc = enc as? DACEEncoder
+        val psnr    = daceEnc?.getLastPsnrY()    ?: 0.0
+        val encUs   = daceEnc?.getLastEncodeTimeUs() ?: 0L
+        val cl      = enc.getLastComplexity()
+        val tsUs    = System.currentTimeMillis() * 1000L
+        Log.i(LATENCY_TAG, "SEND seq=$seq cl=$cl nal_b=${nalBytes.size} psnr=${"%.2f".format(psnr)} enc_us=$encUs ts_us=$tsUs")
 
         try {
             meshServiceRef?.sendVideo(recipientId, payload)
@@ -460,7 +470,8 @@ class RTCConnectionManager(
         val seq = ((payload[0].toInt() and 0xFF) shl 8) or (payload[1].toInt() and 0xFF)
         val nalData = if (payload.size > 2) payload.copyOfRange(2, payload.size) else return
 
-        Log.d(LATENCY_TAG, "📹 handleIncomingVideo: seq=$seq nalBytes=${nalData.size}")
+        val tsUs = System.currentTimeMillis() * 1000L
+        Log.i(LATENCY_TAG, "RECV seq=$seq nal_b=${nalData.size} ts_us=$tsUs")
 
         meshServiceRef?.sendVideoAck(packet.senderID.toHexString(), seq)
 

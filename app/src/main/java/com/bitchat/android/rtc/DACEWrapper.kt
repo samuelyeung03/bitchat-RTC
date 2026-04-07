@@ -20,6 +20,8 @@ internal class DACEWrapper {
         @JvmStatic external fun nativeGetLastComplexity(handle: Long): Int
 
         @JvmStatic external fun nativeDestroyEncoder(handle: Long)
+        @JvmStatic external fun nativeGetLastPsnrY(handle: Long): Double
+        @JvmStatic external fun nativeGetLastEncodeTimeUs(handle: Long): Long
 
         fun createEncoder(width: Int, height: Int, fps: Int, bitrate: Int, complexityLevel: Int): Long =
             nativeCreateEncoder(width, height, fps, bitrate, complexityLevel)
@@ -33,7 +35,8 @@ internal class DACEWrapper {
         fun getLastComplexity(handle: Long): Int =
             nativeGetLastComplexity(handle)
 
-        fun destroyEncoder(handle: Long) =
-            nativeDestroyEncoder(handle)
+        fun destroyEncoder(handle: Long) = nativeDestroyEncoder(handle)
+        fun getLastPsnrY(handle: Long): Double = nativeGetLastPsnrY(handle)
+        fun getLastEncodeTimeUs(handle: Long): Long = nativeGetLastEncodeTimeUs(handle)
     }
 }

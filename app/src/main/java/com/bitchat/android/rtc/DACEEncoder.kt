@@ -65,6 +65,12 @@ class DACEEncoder(
     override fun getLastComplexity(): Int =
         if (encoderHandle != 0L) DACEWrapper.getLastComplexity(encoderHandle) else -1
 
+    fun getLastPsnrY(): Double =
+        if (encoderHandle != 0L) DACEWrapper.getLastPsnrY(encoderHandle) else 0.0
+
+    fun getLastEncodeTimeUs(): Long =
+        if (encoderHandle != 0L) DACEWrapper.getLastEncodeTimeUs(encoderHandle) else 0L
+
     override fun release() {
         if (encoderHandle != 0L) DACEWrapper.destroyEncoder(encoderHandle)
     }
