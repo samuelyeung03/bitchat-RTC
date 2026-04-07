@@ -260,13 +260,30 @@ static int run_sender(const char *cam_dev, int complexity, int dace_on, int n_fr
     param.b_annexb            = 1;
     param.i_threads           = 1;
     param.i_log_level         = X264_LOG_NONE;
-    /* DACE: on=auto(-1) or fixed CL; off=plain x264 */
-    param.dace                  = dace_on;
-    param.dace_complexity_level = dace_on ? complexity : 0; /* ignored when dace=0 */
-    param.analyse.b_psnr        = 1;
+    if (dace_on) {
+        /* DACE enabled: auto (-1) or fixed CL (0-9) */
+        param.dace                  = 1;
+        param.dace_complexity_level = complexity; /* -1=auto, 0-9=fixed */
+    } else {
+        /* DACE disabled: apply the same analysis params as CL0 so the
+         * comparison is fair — same encoder effort, just no adaptive logic. */
+        param.dace                        = 0;
+        param.analyse.i_trellis           = 0;
+        param.analyse.inter               = X264_ANALYSE_I4x4 | X264_ANALYSE_I8x8;
+        param.analyse.i_me_method         = X264_ME_DIA;
+        param.analyse.i_subpel_refine     = 1;
+        param.analyse.b_mixed_references  = 0;
+        param.analyse.b_chroma_me         = 0;
+        param.analyse.i_me_range          = 16;
+        param.analyse.b_weighted_bipred   = X264_WEIGHTP_SIMPLE;
+        param.analyse.b_fast_pskip        = 1;
+        param.b_deblocking_filter         = 0;
+    }
+    param.analyse.b_psnr = 1;
 
-    const char *mode_str = !dace_on ? "DACE-OFF(plain x264)" :
-                           (complexity < 0 ? "DACE-ON(auto)" : "DACE-ON(fixed)");
+    const char *mode_str = !dace_on       ? "DACE-OFF(CL0-params)" :
+                           complexity < 0 ? "DACE-ON(auto)"        :
+                                            "DACE-ON(fixed)";
     fprintf(stderr, "[sender] mode=%s complexity=%d frames=%d\n",
             mode_str, complexity, n_frames);
 
