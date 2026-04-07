@@ -237,7 +237,7 @@ static void v4l2_close(V4L2Ctx *ctx) {
 }
 
 /* ── SENDER ──────────────────────────────────────────────────────────────────*/
-static int run_sender(const char *cam_dev, int complexity, int n_frames) {
+static int run_sender(const char *cam_dev, int complexity, int dace_on, int n_frames) {
     /* ── x264 init ── */
     x264_param_t param;
     x264_param_default(&param);
@@ -260,9 +260,15 @@ static int run_sender(const char *cam_dev, int complexity, int n_frames) {
     param.b_annexb            = 1;
     param.i_threads           = 1;
     param.i_log_level         = X264_LOG_NONE;
-    param.dace                = 1;
-    param.dace_complexity_level = complexity;
-    param.analyse.b_psnr      = 1;
+    /* DACE: on=auto(-1) or fixed CL; off=plain x264 */
+    param.dace                  = dace_on;
+    param.dace_complexity_level = dace_on ? complexity : 0; /* ignored when dace=0 */
+    param.analyse.b_psnr        = 1;
+
+    const char *mode_str = !dace_on ? "DACE-OFF(plain x264)" :
+                           (complexity < 0 ? "DACE-ON(auto)" : "DACE-ON(fixed)");
+    fprintf(stderr, "[sender] mode=%s complexity=%d frames=%d\n",
+            mode_str, complexity, n_frames);
 
     x264_t *enc = x264_encoder_open(&param);
     if (!enc) { fprintf(stderr, "[sender] x264_encoder_open failed\n"); return 1; }
@@ -307,7 +313,7 @@ static int run_sender(const char *cam_dev, int complexity, int n_frames) {
     int keyframe_interval = FPS;  /* IDR every 1 second */
 
     /* CSV header to stdout */
-    printf("seq,complexity,psnr_enc_db,dace_enc_us,nal_size_b,send_us\n");
+    printf("seq,dace_on,complexity,psnr_enc_db,dace_enc_us,nal_size_b,send_us\n");
 
     for (int i = 0; i < n_frames || n_frames < 0; i++) {
         int buf_idx;
@@ -392,8 +398,8 @@ static int run_sender(const char *cam_dev, int complexity, int n_frames) {
             break;
         }
 
-        printf("%u,%d,%.3f,%u,%d,%lld\n",
-               seq, complexity, psnr_enc, dace_et, frame_size,
+        printf("%u,%d,%d,%.3f,%u,%d,%lld\n",
+               seq, dace_on, complexity, psnr_enc, dace_et, frame_size,
                (long long)send_us);
 
         seq++;
@@ -519,15 +525,17 @@ int main(int argc, char **argv) {
     const char *mode       = NULL;
     const char *cam_dev    = "/dev/video0";
     const char *sender_ip  = "127.0.0.1";
-    int         complexity = 2;
-    int         n_frames   = 150;   /* 5 s at 30fps */
+    int         complexity = -1;   /* -1 = DACE auto; 0-9 = fixed CL */
+    int         dace_on    = 1;    /* 1 = DACE enabled; 0 = plain x264 */
+    int         n_frames   = 150;  /* 5 s at 30fps */
     int64_t     delta_us   = 0;
     int         save_n     = 10;
 
     for (int i = 1; i < argc; i++) {
-        if      (!strcmp(argv[i], "--sender"))   mode = "sender";
-        else if (!strcmp(argv[i], "--receiver")) mode = "receiver";
-        else if (!strcmp(argv[i], "--mono-us"))  { printf("%lld\n",(long long)now_us()); return 0; }
+        if      (!strcmp(argv[i], "--sender"))    mode    = "sender";
+        else if (!strcmp(argv[i], "--receiver"))  mode    = "receiver";
+        else if (!strcmp(argv[i], "--mono-us"))   { printf("%lld\n",(long long)now_us()); return 0; }
+        else if (!strcmp(argv[i], "--dace-off"))  dace_on = 0;
         else if (!strcmp(argv[i], "--cam")         && i+1<argc) cam_dev   = argv[++i];
         else if (!strcmp(argv[i], "--sender-ip")   && i+1<argc) sender_ip = argv[++i];
         else if (!strcmp(argv[i], "--complexity")  && i+1<argc) complexity= atoi(argv[++i]);
@@ -539,14 +547,18 @@ int main(int argc, char **argv) {
     if (!mode) {
         fprintf(stderr,
             "Usage:\n"
-            "  %s --sender   [--cam /dev/videoX] [--complexity 0-5] [--frames N]\n"
+            "  %s --sender   [--cam /dev/videoX] [--complexity -1..9] [--frames N]\n"
+            "                [--dace-off]   (plain x264, no DACE)\n"
+            "  --complexity -1 = DACE auto (default)\n"
+            "  --complexity N  = DACE fixed CL N for benchmarking\n"
+            "  --dace-off      = disable DACE entirely (control group)\n"
             "  %s --receiver [--sender-ip IP] [--clock-delta µs] [--save-frames N]\n"
             "  %s --mono-us\n", argv[0], argv[0], argv[0]);
         return 1;
     }
 
     if (!strcmp(mode, "sender"))
-        return run_sender(cam_dev, complexity, n_frames);
+        return run_sender(cam_dev, complexity, dace_on, n_frames);
     else
         return run_receiver(sender_ip, delta_us, save_n);
 }
