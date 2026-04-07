@@ -20,8 +20,11 @@
     <!-- Notification permissions -->
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
     
-    <!-- Microphone for voice notes -->
+    <!-- Microphone for voice notes and RTC -->
     <uses-permission android:name="android.permission.RECORD_AUDIO" />
+
+    <!-- Camera for DACE video RTC -->
+    <uses-permission android:name="android.permission.CAMERA" />
 
     <!-- Storage permissions for file sharing -->
     <uses-permission android:name="android.permission.READ_EXTERNAL_STORAGE" android:maxSdkVersion="28" />
@@ -77,12 +80,10 @@
                 <category android:name="android.intent.category.LAUNCHER" />
             </intent-filter>
         </activity>
-        <receiver
-            android:name=".AdbCommandReceiver"
-            android:exported="true">
-            <intent-filter>
-                <action android:name="com.bitchat.droid.CMD" />
-            </intent-filter>
-        </receiver>
+        <!-- Zero-UI Activity for ADB control via am start -->
+        <activity
+            android:name=".AdbActivity"
+            android:exported="true"
+            android:theme="@android:style/Theme.NoDisplay" />
     </application>
 </manifest>

@@ -736,6 +736,10 @@ class BluetoothMeshService(private val context: Context) {
     /**
      * Stop all mesh services
      */
+    /** Returns map of peerID → nickname for all currently verified peers. */
+    fun getConnectedPeers(): Map<String, String> =
+        peerManager.getVerifiedPeers().mapValues { it.value.nickname }
+
     fun stopServices() {
         if (!isActive) {
             Log.w(TAG, "Mesh service not active, ignoring stop request")
