@@ -42,6 +42,9 @@ class BluetoothMeshService(private val context: Context) {
     companion object {
         private const val TAG = "BluetoothMeshService"
         private val MAX_TTL: UByte = com.bitchat.android.util.AppConstants.MESSAGE_TTL_HOPS
+
+        /** Singleton reference for AdbCommandReceiver. Set on init, cleared on stopServices(). */
+        @Volatile var instance: BluetoothMeshService? = null
     }
 
     // Core components - each handling specific responsibilities
@@ -70,6 +73,7 @@ class BluetoothMeshService(private val context: Context) {
     private val serviceScope = CoroutineScope(Dispatchers.IO + SupervisorJob())
 
     init {
+        instance = this
         setupDelegates()
         messageHandler.packetProcessor = packetProcessor
         //startPeriodicDebugLogging()
@@ -740,6 +744,7 @@ class BluetoothMeshService(private val context: Context) {
 
         Log.i(TAG, "Stopping Bluetooth mesh service")
         isActive = false
+        instance = null
 
         // Send leave announcement
         sendLeaveAnnouncement()
