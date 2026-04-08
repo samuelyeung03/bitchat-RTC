@@ -96,25 +96,44 @@ adb -s 798f51f064cce0d1 install -r app/build/outputs/apk/debug/app-debug.apk
 adb -s f501a6221ec14252 install -r app/build/outputs/apk/debug/app-debug.apk
 ```
 
-## Test results (2026-04-08, BLE mesh, 320×240 @15fps, 100kbps)
+## Test results (2026-04-08, BLE mesh, 320×240 @5fps, 100kbps)
 
-| Mode   | PSNR avg | Enc avg | NAL avg | Recv/254 |
-|--------|----------|---------|---------|----------|
-| auto   | 53.8 dB  | 22 ms   | 806 B   | ~9       |
-| CL0    | 52.0 dB  |  4 ms   | 825 B   | ~8       |
-| CL1    | 50.2 dB  |  5 ms   | 830 B   | ~16      |
-| CL2    | 52.6 dB  |  6 ms   | 830 B   | ~2       |
-| CL3    | 52.3 dB  |  7 ms   | 842 B   | 0        |
-| CL4    | 52.1 dB  | 13 ms   | 852 B   | ~7       |
-| CL5    | 53.3 dB  | 11 ms   | 842 B   | ~4       |
+### Encoder-side PSNR + timing (definitive, all CLs)
 
-**Key observations:**
-- PSNR 50-54 dB is **encoder-side** (x264 reconstructed vs input). BLE transport does not affect PSNR.
-- Encode time scales with CL as expected (CL0=4ms, CL5=11ms, auto=22ms).
-- **Packet loss ~97%** at 15fps — BLE mesh throughput (~1-2 KB/s video) can't sustain 15fps × 850B/frame.
-- Next: reduce to 5fps or use `set_complexity` mid-stream to get cleaner latency measurements.
-- Latency when received: 50-500ms (sparse, BLE congestion; δ≈-19ms between Pi1 and Pi2 clocks).
-- Script: `python3 test/ble_psnr_test.py --duration 20 --cls -1 0 1 2 3 4 5`
+| Mode   | PSNR avg | PSNR min | Enc avg | NAL avg |
+|--------|----------|----------|---------|---------|
+| auto   | 42.7 dB  | 36.0 dB  | 46 ms   | 2567 B  |
+| CL0    | 43.4 dB  | 42.4 dB  |  6 ms   | 2496 B  |
+| CL1    | 43.0 dB  | 40.3 dB  |  5 ms   | 2416 B  |
+| CL2    | 43.2 dB  | 41.3 dB  |  9 ms   | 2439 B  |
+| CL3    | 43.6 dB  | 42.7 dB  | 12 ms   | 2519 B  |
+| CL4    | 43.9 dB  | 43.0 dB  | 18 ms   | 2512 B  |
+| CL5    | 43.9 dB  | 43.0 dB  | 18 ms   | 2517 B  |
+
+**Key findings:**
+- **Encode time** scales clearly with CL: CL0=6ms, CL1=5ms, CL2=9ms, CL3=12ms, CL4/5=18ms, auto=46ms.
+- **PSNR is roughly constant (~43 dB)** across all fixed CLs — DACE CL affects CPU cost, not quality (bitrate-limited).
+- **DACE auto (CL=-1) has 46ms encode time** — 8× slower than CL0 — adapting to scene complexity. No PSNR gain vs fixed CLs.
+- **NAL size stable ~2400-2570 B** — encoder fills the 100kbps budget regardless of CL.
+- PSNR is **encoder-side** (x264 reconstructed vs input). BLE transport does not affect this metric.
+
+### BLE transport observations
+- **Packet delivery: ~3-37% at 5fps** — 5fps × 2500B/frame = 12.5 KB/s exceeds sustained BLE mesh budget.
+- Each frame = ~6 BLE fragments (2500B / 469B). At 10ms pacing = 60ms per frame.
+- `CONNECTION_PRIORITY_HIGH` (7.5ms interval) set, MTU=517. Theoretical max ~35 KB/s but practical is lower.
+- `WRITE_TYPE_NO_RESPONSE` + `notifyCharacteristicChanged(confirm=false)` applied for video.
+- Remaining bottleneck: Android GATT stack serialises writes; need ≥1 connection interval between writes.
+- **Next steps**: reduce bitrate to 40kbps (→ ~1000B/frame = 3 fragments = 30ms/frame), or drop to 2fps.
+
+### ADB test commands
+```bash
+python3 test/ble_psnr_test.py --duration 30 --cls -1 0 1 2 3 4 5  # full sweep
+python3 test/ble_psnr_test.py --duration 30 --cls -1 0             # quick DACE on/off
+```
+
+### Known hardware issue
+- Pi1 (798f) loses clock on power-off → always run `adb -s 798f51f064cce0d1 root && adb shell date -s @$(date +%s)` after Pi1 reboots.
+- Staggered startup required: start Pi1 first, wait 8s, then start Pi2 so Pi2 scans and finds Pi1.
 
 ## User preferences
 - Do NOT use the TCP bench as a substitute for BLE-mesh testing

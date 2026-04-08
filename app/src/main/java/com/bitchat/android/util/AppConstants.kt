@@ -142,7 +142,7 @@ object AppConstants {
         // Frame dimensions — QVGA is small enough for Bluetooth mesh bandwidth
         const val DEFAULT_WIDTH: Int  = 320
         const val DEFAULT_HEIGHT: Int = 240
-        const val DEFAULT_FPS: Int    = 15
+        const val DEFAULT_FPS: Int    = 5   // BLE mesh ~1-2 KB/s video budget; 5fps × 850B ≈ 4.25 KB/s
 
         // Bitrate budget.  Bluetooth LE practical throughput ~200 kbps shared
         // with audio; video gets ~100 kbps leaving headroom for overhead.

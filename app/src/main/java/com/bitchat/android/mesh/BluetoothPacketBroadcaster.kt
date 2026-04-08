@@ -204,49 +204,65 @@ class BluetoothPacketBroadcaster(
         characteristic: BluetoothGattCharacteristic?
     ): Boolean {
         val packet = routed.packet
-        val data = packet.toBinaryData() ?: return false
-        val isFile = packet.type == MessageType.FILE_TRANSFER.value
-        if (isFile) {
-            Log.d(TAG, "📤 Broadcasting FILE_TRANSFER: ${packet.payload.size} bytes")
-        }
-        // Prefer caller-provided transferId (e.g., for encrypted media), else derive for FILE_TRANSFER
+        val isFile  = packet.type == MessageType.FILE_TRANSFER.value
+        val isVideo = packet.type == MessageType.VIDEO.value
         val transferId = routed.transferId ?: (if (isFile) sha256Hex(packet.payload) else null)
-        if (transferId != null) {
-            TransferProgressManager.start(transferId, 1)
-        }
-        val typeName = MessageType.fromValue(packet.type)?.name ?: packet.type.toString()
-        val incomingAddr = routed.relayAddress
-        val incomingPeer = incomingAddr?.let { connectionTracker.addressPeerMap[it] }
-        val senderPeerID = routed.peerID ?: packet.senderID.toHexString()
-        val senderNick = senderPeerID.let { pid -> nicknameResolver?.invoke(pid) }
 
-        // Prefer server-side subscriptions
+        // Fragment large packets (video frames always exceed 469 B)
+        if (fragmentManager != null) {
+            val fragments = try { fragmentManager.createFragments(packet) }
+            catch (e: Exception) { Log.e(TAG, "Fragment failed: ${e.message}"); return false }
+
+            if (fragments.size > 1) {
+                connectionScope.launch {
+                    if (transferId != null) TransferProgressManager.start(transferId, fragments.size)
+                    var sent = 0
+                    fragments.forEach { frag ->
+                        if (!isActive) return@launch
+                        val fragData = frag.toBinaryData() ?: return@forEach
+                        sendDataToPeer(fragData, targetPeerID, gattServer, characteristic, isVideo)
+                        // 10 ms pacing for video ≥ one BLE connection interval at HIGH priority (7.5 ms).
+                        // 20 ms for everything else preserves existing behaviour.
+                        delay(if (isVideo) 10L else 20L)
+                        if (transferId != null) {
+                            sent++
+                            TransferProgressManager.progress(transferId, sent, fragments.size)
+                            if (sent == fragments.size) TransferProgressManager.complete(transferId, fragments.size)
+                        }
+                    }
+                }
+                return true
+            }
+        }
+
+        // Single-fragment path (fits in one BLE packet)
+        val data = packet.toBinaryData() ?: return false
+        if (transferId != null) TransferProgressManager.start(transferId, 1)
+        val ok = sendDataToPeer(data, targetPeerID, gattServer, characteristic, isVideo)
+        if (ok && transferId != null) {
+            TransferProgressManager.progress(transferId, 1, 1)
+            TransferProgressManager.complete(transferId, 1)
+        }
+        return ok
+    }
+
+    /** Low-level: send raw bytes to a specific peer (server notification or client write). */
+    private fun sendDataToPeer(
+        data: ByteArray,
+        targetPeerID: String,
+        gattServer: BluetoothGattServer?,
+        characteristic: BluetoothGattCharacteristic?,
+        noResponse: Boolean = false
+    ): Boolean {
+        // Server-side (we are the peripheral, peer subscribed via notification/indication)
         val serverTarget = connectionTracker.getSubscribedDevices()
             .firstOrNull { connectionTracker.addressPeerMap[it.address] == targetPeerID }
-        if (serverTarget != null) {
-            if (notifyDevice(serverTarget, data, gattServer, characteristic)) {
-                logPacketRelay(typeName, senderPeerID, senderNick, incomingPeer, incomingAddr, targetPeerID, serverTarget.address, packet.ttl)
-                if (transferId != null) {
-                    TransferProgressManager.progress(transferId, 1, 1)
-                    TransferProgressManager.complete(transferId, 1)
-                }
-                return true
-            }
-        }
+        if (serverTarget != null && notifyDevice(serverTarget, data, gattServer, characteristic, confirm = !noResponse)) return true
 
-        // Then client connections
+        // Client-side (we are the central, write to peer's characteristic)
         val clientTarget = connectionTracker.getConnectedDevices().values
             .firstOrNull { connectionTracker.addressPeerMap[it.device.address] == targetPeerID }
-        if (clientTarget != null) {
-            if (writeToDeviceConn(clientTarget, data)) {
-                logPacketRelay(typeName, senderPeerID, senderNick, incomingPeer, incomingAddr, targetPeerID, clientTarget.device.address, packet.ttl)
-                if (transferId != null) {
-                    TransferProgressManager.progress(transferId, 1, 1)
-                    TransferProgressManager.complete(transferId, 1)
-                }
-                return true
-            }
-        }
+        if (clientTarget != null && writeToDeviceConn(clientTarget, data, noResponse)) return true
 
         return false
     }
@@ -376,18 +392,21 @@ class BluetoothPacketBroadcaster(
     }
     
     /**
-     * Send data to a single device (server->client)
+     * Send data to a single device (server->client).
+     * [confirm] = true → indication (ACK required, reliable but slower).
+     * [confirm] = false → notification (no ACK, higher throughput, use for video).
      */
     private fun notifyDevice(
-        device: BluetoothDevice, 
+        device: BluetoothDevice,
         data: ByteArray,
         gattServer: BluetoothGattServer?,
-        characteristic: BluetoothGattCharacteristic?
+        characteristic: BluetoothGattCharacteristic?,
+        confirm: Boolean = true
     ): Boolean {
         return try {
             characteristic?.let { char ->
                 char.value = data
-                val result = gattServer?.notifyCharacteristicChanged(device, char, true) ?: false
+                val result = gattServer?.notifyCharacteristicChanged(device, char, confirm) ?: false
                 result
             } ?: false
         } catch (e: Exception) {
@@ -402,16 +421,21 @@ class BluetoothPacketBroadcaster(
     }
 
     /**
-     * Send data to a single device (client->server)
+     * Send data to a single device (client->server).
+     * [noResponse] = true uses WRITE_TYPE_NO_RESPONSE (fire-and-forget, higher throughput for video).
      */
     private fun writeToDeviceConn(
-        deviceConn: BluetoothConnectionTracker.DeviceConnection, 
-        data: ByteArray
+        deviceConn: BluetoothConnectionTracker.DeviceConnection,
+        data: ByteArray,
+        noResponse: Boolean = false
     ): Boolean {
         return try {
             deviceConn.characteristic?.let { char ->
                 char.value = data
-                char.writeType = BluetoothGattCharacteristic.WRITE_TYPE_DEFAULT
+                char.writeType = if (noResponse)
+                    BluetoothGattCharacteristic.WRITE_TYPE_NO_RESPONSE
+                else
+                    BluetoothGattCharacteristic.WRITE_TYPE_DEFAULT
                 val result = deviceConn.gatt?.writeCharacteristic(char) ?: false
                 result
             } ?: false

@@ -58,13 +58,18 @@ def measure_clock_delta(n=16):
     """Return sender_offset - receiver_offset in µs (for corrected latency)."""
     def offset(serial):
         samples = []
+        host_now_us = int(time.time() * 1e6)
         for _ in range(n + 2):
             t1 = time.time()
             r  = adb(serial, "shell", "date +%s%6N", timeout=5)
             t2 = time.time()
-            if r.returncode or not r.stdout.strip().isdigit():
+            raw = r.stdout.strip()
+            if r.returncode or not raw.isdigit():
                 continue
-            dev = int(r.stdout.strip())
+            dev = int(raw)
+            # Sanity: device time should be within 5 minutes of host
+            if abs(dev - host_now_us) > 5 * 60 * 1_000_000:
+                continue
             mid = int(((t1 + t2) / 2) * 1e6)
             samples.append((int((t2 - t1) * 1e6), mid - dev))
         samples.sort()
@@ -107,23 +112,23 @@ def wait_for_ble_peer(timeout=60):
         time.sleep(3)
     return False
 
-def run_pass(cl, duration, clock_delta):
+def run_pass(cl, duration, clock_delta, video_already_running=False):
     """
-    Start video with given CL, collect logs for `duration` seconds, stop.
-    Returns (send_rows, recv_rows).
+    Set CL (or start video if not running), collect logs for `duration` s.
+    Returns (send_rows, recv_rows, clock_delta_used).
     """
     label = "auto" if cl == -1 else f"cl{cl}"
 
-    # Re-sync clocks before each pass for accurate per-pass latency
+    # Re-sync clocks before each pass
     sync_clocks()
-    time.sleep(0.3)
+    time.sleep(0.2)
     clock_delta = measure_clock_delta()
     print(f"  [{label}] cl={cl}  duration={duration}s  delta={clock_delta:+d}µs")
 
     # Clear logcat on both
     adb(SENDER_SERIAL,   "shell", "logcat", "-c", timeout=5)
     adb(RECEIVER_SERIAL, "shell", "logcat", "-c", timeout=5)
-    time.sleep(0.5)
+    time.sleep(0.4)
 
     send_lines, recv_lines = [], []
     stop_evt = threading.Event()
@@ -132,16 +137,16 @@ def run_pass(cl, duration, clock_delta):
     t_recv = threading.Thread(target=collect_logcat,
                                args=(RECEIVER_SERIAL, stop_evt, recv_lines), daemon=True)
     t_send.start(); t_recv.start()
-    time.sleep(0.5)
+    time.sleep(0.4)
 
-    # Start video — give BLE a few seconds to warm up before counting frames
-    adb_cmd(SENDER_SERIAL, "start_video",
-            extras={"peer_id": RECEIVER_PEER, "cl": cl})
+    if video_already_running:
+        # Just change CL — no stop/start, keeps BLE connection stable
+        adb_cmd(SENDER_SERIAL, "set_complexity", extras={"cl": cl})
+    else:
+        adb_cmd(SENDER_SERIAL, "start_video",
+                extras={"peer_id": RECEIVER_PEER, "cl": cl, "fps": 5})
+
     time.sleep(duration)
-
-    # Stop video
-    adb_cmd(SENDER_SERIAL, "stop_video")
-    time.sleep(2.5)
     stop_evt.set()
     t_send.join(3); t_recv.join(3)
 
@@ -168,7 +173,7 @@ def run_pass(cl, duration, clock_delta):
             })
 
     print(f"  [{label}] parsed: {len(send_rows)} SEND  {len(recv_rows)} RECV")
-    return send_rows, recv_rows
+    return send_rows, recv_rows, clock_delta
 
 
 # ── stats ─────────────────────────────────────────────────────────────────────
@@ -242,32 +247,39 @@ def main():
     print(f"  duration: {args.duration}s per pass")
     print("=" * 65)
 
-    print("\n[1] Syncing clocks …")
+    print("\n[1] Syncing clocks (rooting if needed) …")
+    for s in [SENDER_SERIAL, RECEIVER_SERIAL]:
+        adb(s, "root", timeout=6)
+    time.sleep(2)
     sync_clocks()
-    time.sleep(0.3)
+    time.sleep(0.5)
 
     print("[2] Measuring clock delta …")
     clock_delta = measure_clock_delta()
     print(f"    delta = {clock_delta:+d} µs")
 
+    # Ensure BLE is up before starting
+    print("\n[connecting] waiting for BLE peer …", end=" ", flush=True)
+    if not wait_for_ble_peer(timeout=60):
+        print("TIMEOUT — aborting"); sys.exit(1)
+    print("connected")
+
+    # Start video once on first CL, then only change CL between passes
+    first_pass = True
     results = {}
     for i, cl in enumerate(args.cls):
         label = "auto" if cl == -1 else f"CL{cl}"
         print(f"\n[pass {label}]")
+        time.sleep(2)
 
-        # Ensure BLE peer is connected before each pass
-        print(f"  checking BLE peer …", end=" ", flush=True)
-        if not wait_for_ble_peer(timeout=45):
-            print(f"TIMEOUT — skipping {label}")
-            results[label] = {"n": 0, "lost": 0, "lat_us": _stat([]), "psnr": _stat([]),
-                               "enc_us": _stat([]), "nal_b": _stat([])}
-            continue
-        print("connected")
-        time.sleep(3)  # brief settle
+        send_rows, recv_rows, pass_delta = run_pass(cl, args.duration, clock_delta,
+                                                    video_already_running=(not first_pass))
+        first_pass = False
+        results[label] = analyse(send_rows, recv_rows, pass_delta)
+        save_csv(send_rows, recv_rows, pass_delta, f"{args.out}_{label}.csv")
 
-        send_rows, recv_rows = run_pass(cl, args.duration, clock_delta)
-        results[label] = analyse(send_rows, recv_rows, clock_delta)
-        save_csv(send_rows, recv_rows, clock_delta, f"{args.out}_{label}.csv")
+    # Stop video after all passes
+    adb_cmd(SENDER_SERIAL, "stop_video")
 
     # ── summary table ──
     HDR = (f"\n{'Mode':<8} {'n':>4} {'lost':>4}  "

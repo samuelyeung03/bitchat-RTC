@@ -363,7 +363,7 @@ class RTCConnectionManager(
      * @param remoteView  TextureView to render the decoded remote video onto;
      *                    pass null to receive-only without display
      */
-    fun startVideo(senderId: String, recipientId: String?, remoteView: TextureView? = null, complexityLevel: Int = -1) {
+    fun startVideo(senderId: String, recipientId: String?, remoteView: TextureView? = null, complexityLevel: Int = -1, fps: Int = AppConstants.Dace.DEFAULT_FPS) {
         if (context == null) {
             Log.e(TAG, "startVideo: Context required for camera access")
             return
@@ -380,7 +380,6 @@ class RTCConnectionManager(
 
         val width  = AppConstants.Dace.DEFAULT_WIDTH
         val height = AppConstants.Dace.DEFAULT_HEIGHT
-        val fps    = AppConstants.Dace.DEFAULT_FPS
 
         videoEncoder = DACEEncoder(
             width           = width,
@@ -396,7 +395,7 @@ class RTCConnectionManager(
             videoOutputDevice = VideoOutputDevice(it, width, height)
         }
 
-        videoInputDevice = VideoInputDevice(context, width, height) { yuv420 ->
+        videoInputDevice = VideoInputDevice(context, width, height, fps) { yuv420 ->
             sendEncodedVideoFrame(yuv420, recipientId)
         }
 

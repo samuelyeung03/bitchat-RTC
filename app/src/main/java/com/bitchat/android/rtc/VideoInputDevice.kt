@@ -22,6 +22,7 @@ class VideoInputDevice(
     private val context: Context,
     private val width: Int  = AppConstants.Dace.DEFAULT_WIDTH,
     private val height: Int = AppConstants.Dace.DEFAULT_HEIGHT,
+    private val fps: Int    = AppConstants.Dace.DEFAULT_FPS,
     private val onFrame: (yuv420: ByteArray) -> Unit
 ) {
     companion object {
@@ -31,6 +32,10 @@ class VideoInputDevice(
 
     private val cameraThread  = HandlerThread("CameraThread").also { it.start() }
     private val cameraHandler = Handler(cameraThread.looper)
+
+    // Software frame throttle: drop frames to stay at target fps
+    private val minFrameIntervalNs = if (fps > 0) (1_000_000_000L / fps) else 0L
+    @Volatile private var lastFrameNs = 0L
 
     private var cameraDevice:   CameraDevice?     = null
     private var captureSession: CameraCaptureSession? = null
@@ -53,6 +58,12 @@ class VideoInputDevice(
         imageReader!!.setOnImageAvailableListener({ reader ->
             val image = reader.acquireLatestImage() ?: return@setOnImageAvailableListener
             try {
+                // Software FPS cap: drop frames that arrive too early
+                val now = System.nanoTime()
+                if (minFrameIntervalNs > 0 && (now - lastFrameNs) < minFrameIntervalNs) {
+                    return@setOnImageAvailableListener
+                }
+                lastFrameNs = now
                 val yuv = imageToYuv420(image, width, height)
                 onFrame(yuv)
             } finally {
@@ -80,6 +91,8 @@ class VideoInputDevice(
                 val request = camera.createCaptureRequest(CameraDevice.TEMPLATE_RECORD).apply {
                     addTarget(surface)
                     set(CaptureRequest.CONTROL_MODE, CaptureRequest.CONTROL_MODE_AUTO)
+                    // Clamp camera output to target FPS to avoid encoding more frames than BLE can carry
+                    set(CaptureRequest.CONTROL_AE_TARGET_FPS_RANGE, android.util.Range(fps, fps))
                 }
                 session.setRepeatingRequest(request.build(), null, cameraHandler)
                 Log.i(TAG, "Camera capture started: ${width}x$height")

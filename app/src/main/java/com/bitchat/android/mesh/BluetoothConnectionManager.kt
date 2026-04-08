@@ -259,10 +259,10 @@ class BluetoothConnectionManager(
     /**
      * Send a packet directly to a specific peer, without broadcasting to others.
      */
-    fun sendPacketToPeer(peerID: String, packet: BitchatPacket): Boolean {
+    fun sendPacketToPeer(peerID: String, packet: BitchatPacket, transferId: String? = null): Boolean {
         if (!isActive) return false
         return packetBroadcaster.sendPacketToPeer(
-            RoutedPacket(packet),
+            RoutedPacket(packet, transferId = transferId),
             peerID,
             serverManager.getGattServer(),
             serverManager.getCharacteristic()

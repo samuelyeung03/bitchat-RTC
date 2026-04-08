@@ -53,9 +53,10 @@ class AdbActivity : Activity() {
                 if (peerId.isNullOrBlank()) {
                     Log.e(TAG, "ERROR start_video requires --es peer_id <hex>")
                 } else {
-                    val cl = intent.getIntExtra("cl", -1)
-                    Log.i(TAG, "start_video peer=$peerId cl=$cl")
-                    ms.rtcConnectionManager.startVideo(ms.myPeerID, peerId, complexityLevel = cl)
+                    val cl  = intent.getIntExtra("cl", -1)
+                    val fps = intent.getIntExtra("fps", com.bitchat.android.util.AppConstants.Dace.DEFAULT_FPS)
+                    Log.i(TAG, "start_video peer=$peerId cl=$cl fps=$fps")
+                    ms.rtcConnectionManager.startVideo(ms.myPeerID, peerId, complexityLevel = cl, fps = fps)
                 }
             }
 

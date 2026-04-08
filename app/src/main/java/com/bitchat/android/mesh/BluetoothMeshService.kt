@@ -897,8 +897,14 @@ class BluetoothMeshService(private val context: Context) {
                 )
                 val signed = signPacketBeforeBroadcast(packet)
                 val transferId = sha256Hex(payload)
-                connectionManager.broadcastPacket(RoutedPacket(signed, transferId = transferId))
-                Log.d(TAG, "🚀 sendVideo: broadcasted seq=$seq")
+                // Use targeted send when recipient is known — avoids broadcasting to all mesh peers
+                val sent = if (recipientPeerID != null) {
+                    connectionManager.sendPacketToPeer(recipientPeerID, signed, transferId = transferId)
+                } else {
+                    connectionManager.broadcastPacket(RoutedPacket(signed, transferId = transferId))
+                    true
+                }
+                Log.d(TAG, "🚀 sendVideo: ${if (recipientPeerID != null) "targeted->$recipientPeerID" else "broadcast"} seq=$seq sent=$sent")
             } catch (e: Exception) {
                 Log.e(TAG, "❌ Failed to send video frame seq=$seq: ${e.message}")
             }
