@@ -72,6 +72,7 @@ class RTCConnectionManager(
     private var videoEncoder: VideoEncoder? = null
     private var videoDecoder: VideoDecoder? = null
     private var videoInputDevice: VideoInputDevice? = null
+    private var videoFileInputDevice: YuvFileInputDevice? = null
     private var videoOutputDevice: VideoOutputDevice? = null
     private var videoCaptureJob: Job? = null
     private var videoSeqNumber: Int = 0
@@ -363,23 +364,40 @@ class RTCConnectionManager(
      * @param remoteView  TextureView to render the decoded remote video onto;
      *                    pass null to receive-only without display
      */
-    fun startVideo(senderId: String, recipientId: String?, remoteView: TextureView? = null, complexityLevel: Int = -1, fps: Int = AppConstants.Dace.DEFAULT_FPS) {
-        if (context == null) {
-            Log.e(TAG, "startVideo: Context required for camera access")
-            return
-        }
-        if (ContextCompat.checkSelfPermission(context, Manifest.permission.CAMERA)
-            != PackageManager.PERMISSION_GRANTED) {
-            Log.e(TAG, "startVideo: CAMERA permission not granted")
-            return
+    fun startVideo(
+        senderId: String,
+        recipientId: String?,
+        remoteView: TextureView? = null,
+        complexityLevel: Int = -1,
+        fps: Int = AppConstants.Dace.DEFAULT_FPS,
+        sourcePath: String? = null,
+        sourceWidth: Int? = null,
+        sourceHeight: Int? = null,
+    ) {
+        val useFileSource = !sourcePath.isNullOrBlank()
+
+        if (!useFileSource) {
+            if (context == null) {
+                Log.e(TAG, "startVideo: Context required for camera access")
+                return
+            }
+            if (ContextCompat.checkSelfPermission(context, Manifest.permission.CAMERA)
+                != PackageManager.PERMISSION_GRANTED) {
+                Log.e(TAG, "startVideo: CAMERA permission not granted")
+                return
+            }
         }
         if (videoCaptureJob != null) {
             Log.d(TAG, "startVideo: already running, ignoring")
             return
         }
 
-        val width  = AppConstants.Dace.DEFAULT_WIDTH
-        val height = AppConstants.Dace.DEFAULT_HEIGHT
+        val width  = sourceWidth ?: AppConstants.Dace.DEFAULT_WIDTH
+        val height = sourceHeight ?: AppConstants.Dace.DEFAULT_HEIGHT
+        if (width <= 0 || height <= 0 || width % 2 != 0 || height % 2 != 0) {
+            Log.e(TAG, "startVideo: invalid frame size ${width}x${height}; width/height must be positive and even")
+            return
+        }
 
         videoEncoder = DACEEncoder(
             width           = width,
@@ -395,12 +413,34 @@ class RTCConnectionManager(
             videoOutputDevice = VideoOutputDevice(it, width, height)
         }
 
-        videoInputDevice = VideoInputDevice(context, width, height, fps) { yuv420 ->
-            sendEncodedVideoFrame(yuv420, recipientId)
+        if (useFileSource) {
+            val filePath = sourcePath!!
+            videoFileInputDevice = YuvFileInputDevice(filePath, width, height, fps) { yuv420 ->
+                sendEncodedVideoFrame(yuv420, recipientId)
+            }
+            if (!videoFileInputDevice!!.start()) {
+                Log.e(TAG, "startVideo: failed to start YUV file source at $filePath")
+                videoFileInputDevice = null
+                videoEncoder?.release()
+                videoEncoder = null
+                videoDecoder?.release()
+                videoDecoder = null
+                videoOutputDevice?.release()
+                videoOutputDevice = null
+                return
+            }
+            Log.i(TAG, "DACE video started from file: $filePath ${width}x${height} @${fps}fps to ${recipientId ?: "BROADCAST"}")
+        } else {
+            val ctx = context ?: run {
+                Log.e(TAG, "startVideo: Context required for camera access")
+                return
+            }
+            videoInputDevice = VideoInputDevice(ctx, width, height, fps) { yuv420 ->
+                sendEncodedVideoFrame(yuv420, recipientId)
+            }
+            videoInputDevice!!.start()
+            Log.i(TAG, "DACE video started: ${width}x${height} @${fps}fps to ${recipientId ?: "BROADCAST"}")
         }
-
-        videoInputDevice!!.start()
-        Log.i(TAG, "DACE video started: ${width}x${height} @${fps}fps to ${recipientId ?: "BROADCAST"}")
     }
 
     fun setVideoComplexity(level: Int) {
@@ -412,6 +452,8 @@ class RTCConnectionManager(
         videoCaptureJob = null
         videoInputDevice?.stop()
         videoInputDevice = null
+        videoFileInputDevice?.stop()
+        videoFileInputDevice = null
         videoEncoder?.release()
         videoEncoder = null
         videoDecoder?.release()

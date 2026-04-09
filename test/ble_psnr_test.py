@@ -14,6 +14,7 @@ Usage:
   python3 test/ble_psnr_test.py --duration 20      # seconds per run
   python3 test/ble_psnr_test.py --cls -1 0 2 4     # specific CLs only
   python3 test/ble_psnr_test.py --out /tmp/myrun   # output prefix
+    python3 test/ble_psnr_test.py --src /sdcard/Download/complex_1920x1080.yuv --w 1920 --h 1080
 """
 
 import argparse, math, os, re, statistics, subprocess, sys, threading, time
@@ -23,6 +24,7 @@ RECEIVER_SERIAL = "f501a6221ec14252"   # Pi2
 RECEIVER_PEER   = "ecd39f5b07a23a13"   # Pi2 peer ID (fixed identity)
 PACKAGE         = "com.bitchat.droid"
 ACTIVITY        = f"{PACKAGE}/com.bitchat.android.AdbActivity"
+MAIN_ACTIVITY   = f"{PACKAGE}/com.bitchat.android.MainActivity"
 LOG_TAG         = "latency"
 
 # ── log patterns ──────────────────────────────────────────────────────────────
@@ -48,6 +50,55 @@ def adb_cmd(serial, cmd, extras=None, timeout=10):
         flag = "--ei" if isinstance(v, int) else "--es"
         args += [flag, k, str(v)]
     adb(serial, *args, capture=True, timeout=timeout)
+
+def ensure_bluetooth_on(serial, timeout=25):
+    """Ensure Bluetooth is ON; attempt to enable if OFF."""
+    def is_on():
+        r = adb(serial, "shell", "dumpsys", "bluetooth_manager", timeout=8)
+        out = r.stdout or ""
+        return ("state: ON" in out) and ("enabled: true" in out)
+
+    if is_on():
+        return True
+
+    adb(serial, "shell", "cmd", "bluetooth_manager", "enable", timeout=8)
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        if is_on():
+            return True
+        time.sleep(1)
+    return False
+
+def ensure_mesh_service_running(serial, retries=6):
+    """Ensure BluetoothMeshService exists by probing AdbActivity peer_id."""
+    for _ in range(retries):
+        adb(serial, "shell", "am", "start", "-n", MAIN_ACTIVITY, timeout=8)
+        # MainActivity initializes mesh asynchronously; allow warm-up time.
+        time.sleep(2.4)
+        adb(serial, "shell", "logcat", "-c", timeout=5)
+        adb_cmd(serial, "peer_id")
+        time.sleep(1.2)
+        r = adb(serial, "shell", "logcat", "-d", "-s", "ADB_CMD", timeout=5)
+        out = r.stdout or ""
+        if "PEER_ID " in out:
+            return True
+        time.sleep(1.6)
+    return False
+
+def get_peer_id(serial, retries=6):
+    """Read PEER_ID from device logcat via AdbActivity."""
+    for _ in range(retries):
+        adb(serial, "shell", "am", "start", "-n", MAIN_ACTIVITY, timeout=8)
+        time.sleep(2.0)
+        adb(serial, "shell", "logcat", "-c", timeout=5)
+        adb_cmd(serial, "peer_id")
+        time.sleep(1.2)
+        r = adb(serial, "shell", "logcat", "-d", "-s", "ADB_CMD", timeout=5)
+        m = re.search(r"PEER_ID\s+([0-9a-fA-F]+)", r.stdout or "")
+        if m:
+            return m.group(1).lower()
+        time.sleep(1.4)
+    return None
 
 def sync_clocks():
     ts = time.time()
@@ -98,7 +149,7 @@ def collect_logcat(serial, stop_evt, lines_out):
 
 # ── run one pass ──────────────────────────────────────────────────────────────
 
-def wait_for_ble_peer(timeout=60):
+def wait_for_ble_peer(receiver_peer, timeout=60):
     """Block until Pi1 has Pi2 in its verified peer list."""
     deadline = time.time() + timeout
     while time.time() < deadline:
@@ -107,12 +158,13 @@ def wait_for_ble_peer(timeout=60):
         adb_cmd(SENDER_SERIAL, "peers")
         time.sleep(1)
         r = adb(SENDER_SERIAL, "shell", "logcat", "-d", "-s", "ADB_CMD", timeout=5)
-        if RECEIVER_PEER in r.stdout:
+        if receiver_peer in (r.stdout or ""):
             return True
         time.sleep(3)
     return False
 
-def run_pass(cl, duration, clock_delta, video_already_running=False):
+def run_pass(cl, duration, clock_delta, receiver_peer,
+             video_already_running=False, video_extras=None):
     """
     Set CL (or start video if not running), collect logs for `duration` s.
     Returns (send_rows, recv_rows, clock_delta_used).
@@ -139,12 +191,24 @@ def run_pass(cl, duration, clock_delta, video_already_running=False):
     t_send.start(); t_recv.start()
     time.sleep(0.4)
 
+    video_extras = video_extras or {}
+
     if video_already_running:
         # Just change CL — no stop/start, keeps BLE connection stable
         adb_cmd(SENDER_SERIAL, "set_complexity", extras={"cl": cl})
     else:
+        extras = {
+            "peer_id": receiver_peer,
+            "cl": cl,
+            "fps": int(video_extras.get("fps", 5)),
+        }
+        src = video_extras.get("src")
+        if src:
+            extras["src"] = str(src)
+            extras["w"] = int(video_extras.get("w", 320))
+            extras["h"] = int(video_extras.get("h", 240))
         adb_cmd(SENDER_SERIAL, "start_video",
-                extras={"peer_id": RECEIVER_PEER, "cl": cl, "fps": 5})
+                extras=extras)
 
     time.sleep(duration)
     stop_evt.set()
@@ -235,9 +299,24 @@ def main():
                     help="DACE complexity levels to test (-1=auto, default: -1 0 1 2 3 4 5)")
     ap.add_argument("--duration", type=int, default=15,
                     help="seconds per run (default 15)")
+    ap.add_argument("--fps",      type=int, default=5,
+                    help="target fps for video source (default 5)")
+    ap.add_argument("--src",      default=None,
+                    help="sender device path to planar YUV420 source file")
+    ap.add_argument("--w",        type=int, default=320,
+                    help="source width for --src (default 320)")
+    ap.add_argument("--h",        type=int, default=240,
+                    help="source height for --src (default 240)")
     ap.add_argument("--out",      default="/tmp/ble_psnr",
                     help="output file prefix (default /tmp/ble_psnr)")
     args = ap.parse_args()
+
+    if args.fps <= 0:
+        print("ERROR: --fps must be > 0")
+        sys.exit(1)
+    if args.src and (args.w <= 0 or args.h <= 0 or args.w % 2 != 0 or args.h % 2 != 0):
+        print("ERROR: --w/--h must be positive even numbers when --src is used")
+        sys.exit(1)
 
     print("=" * 65)
     print("  BLE BitChat mesh  —  PSNR + latency test")
@@ -245,7 +324,28 @@ def main():
     print(f"  receiver: {RECEIVER_SERIAL}  (Pi2)")
     print(f"  CLs     : {args.cls}")
     print(f"  duration: {args.duration}s per pass")
+    if args.src:
+        print(f"  source  : file {args.src} ({args.w}x{args.h}) @ {args.fps}fps")
+    else:
+        print(f"  source  : camera @ {args.fps}fps")
     print("=" * 65)
+
+    print("\n[0] Preflight Bluetooth + app service …")
+    if not ensure_bluetooth_on(SENDER_SERIAL):
+        print("    sender Bluetooth is OFF and could not be enabled — aborting")
+        sys.exit(1)
+    if not ensure_bluetooth_on(RECEIVER_SERIAL):
+        print("    receiver Bluetooth is OFF and could not be enabled — aborting")
+        sys.exit(1)
+    if not ensure_mesh_service_running(SENDER_SERIAL):
+        print("    sender BluetoothMeshService not running — aborting")
+        sys.exit(1)
+    if not ensure_mesh_service_running(RECEIVER_SERIAL):
+        print("    receiver BluetoothMeshService not running — aborting")
+        sys.exit(1)
+
+    receiver_peer = get_peer_id(RECEIVER_SERIAL) or RECEIVER_PEER
+    print(f"    receiver peer = {receiver_peer}")
 
     print("\n[1] Syncing clocks (rooting if needed) …")
     for s in [SENDER_SERIAL, RECEIVER_SERIAL]:
@@ -260,9 +360,13 @@ def main():
 
     # Ensure BLE is up before starting
     print("\n[connecting] waiting for BLE peer …", end=" ", flush=True)
-    if not wait_for_ble_peer(timeout=60):
+    if not wait_for_ble_peer(receiver_peer, timeout=60):
         print("TIMEOUT — aborting"); sys.exit(1)
     print("connected")
+
+    video_extras = {"fps": args.fps}
+    if args.src:
+        video_extras.update({"src": args.src, "w": args.w, "h": args.h})
 
     # Start video once on first CL, then only change CL between passes
     first_pass = True
@@ -272,8 +376,26 @@ def main():
         print(f"\n[pass {label}]")
         time.sleep(2)
 
-        send_rows, recv_rows, pass_delta = run_pass(cl, args.duration, clock_delta,
-                                                    video_already_running=(not first_pass))
+        send_rows, recv_rows, pass_delta = run_pass(
+            cl,
+            args.duration,
+            clock_delta,
+            receiver_peer,
+            video_already_running=(not first_pass),
+            video_extras=video_extras,
+        )
+        if len(send_rows) == 0:
+            print(f"  [{label}] no SEND rows; retrying with fresh start_video")
+            adb_cmd(SENDER_SERIAL, "stop_video")
+            time.sleep(0.8)
+            send_rows, recv_rows, pass_delta = run_pass(
+                cl,
+                args.duration,
+                clock_delta,
+                receiver_peer,
+                video_already_running=False,
+                video_extras=video_extras,
+            )
         first_pass = False
         results[label] = analyse(send_rows, recv_rows, pass_delta)
         save_csv(send_rows, recv_rows, pass_delta, f"{args.out}_{label}.csv")

@@ -8,6 +8,7 @@ plugins {
 android {
     namespace = "com.bitchat.android"
     compileSdk = libs.versions.compileSdk.get().toInt()
+    ndkVersion = "27.2.12479018"
 
     defaultConfig {
         applicationId = "com.bitchat.droid"
