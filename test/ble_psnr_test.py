@@ -295,8 +295,8 @@ def save_csv(send_rows, recv_rows, clock_delta, path):
 
 def main():
     ap = argparse.ArgumentParser(description="BLE BitChat video PSNR + latency test")
-    ap.add_argument("--cls",      type=int, nargs="+", default=[-1,0,1,2,3,4,5],
-                    help="DACE complexity levels to test (-1=auto, default: -1 0 1 2 3 4 5)")
+    ap.add_argument("--cls",      type=int, nargs="+", default=[-1,0,1,2,3,4,5,6,7,8,9],
+                    help="DACE complexity levels to test (-1=auto, default: -1 0..9)")
     ap.add_argument("--duration", type=int, default=15,
                     help="seconds per run (default 15)")
     ap.add_argument("--fps",      type=int, default=5,

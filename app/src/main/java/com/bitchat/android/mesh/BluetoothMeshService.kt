@@ -895,13 +895,14 @@ class BluetoothMeshService(private val context: Context) {
                     signature   = null,
                     ttl         = com.bitchat.android.util.AppConstants.MESSAGE_TTL_HOPS
                 )
-                val signed = signPacketBeforeBroadcast(packet)
+                // Skip signing for video packets — saves 64 bytes per frame (≈1 fewer BLE fragment)
+                // Video is ephemeral; authentication is not needed for real-time frames.
                 val transferId = sha256Hex(payload)
                 // Use targeted send when recipient is known — avoids broadcasting to all mesh peers
                 val sent = if (recipientPeerID != null) {
-                    connectionManager.sendPacketToPeer(recipientPeerID, signed, transferId = transferId)
+                    connectionManager.sendPacketToPeer(recipientPeerID, packet, transferId = transferId)
                 } else {
-                    connectionManager.broadcastPacket(RoutedPacket(signed, transferId = transferId))
+                    connectionManager.broadcastPacket(RoutedPacket(packet, transferId = transferId))
                     true
                 }
                 Log.d(TAG, "🚀 sendVideo: ${if (recipientPeerID != null) "targeted->$recipientPeerID" else "broadcast"} seq=$seq sent=$sent")

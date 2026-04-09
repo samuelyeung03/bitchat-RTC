@@ -422,6 +422,14 @@ class BluetoothGattClientManager(
                     )
                 }
             }
+            override fun onPhyUpdate(gatt: BluetoothGatt, txPhy: Int, rxPhy: Int, status: Int) {
+                val phyStr = fun(p: Int) = when (p) { 1 -> "1M"; 2 -> "2M"; 3 -> "Coded"; else -> "?$p" }
+                Log.i(TAG, "Client: PHY updated for $deviceAddress — tx=${phyStr(txPhy)} rx=${phyStr(rxPhy)} status=$status")
+            }
+            override fun onPhyRead(gatt: BluetoothGatt, txPhy: Int, rxPhy: Int, status: Int) {
+                val phyStr = fun(p: Int) = when (p) { 1 -> "1M"; 2 -> "2M"; 3 -> "Coded"; else -> "?$p" }
+                Log.i(TAG, "Client: PHY read for $deviceAddress — tx=${phyStr(txPhy)} rx=${phyStr(rxPhy)} status=$status")
+            }
             override fun onConnectionStateChange(gatt: BluetoothGatt, status: Int, newState: Int) {
                 Log.d(TAG, "Client: Connection state change - Device: $deviceAddress, Status: $status, NewState: $newState")
 
@@ -463,8 +471,14 @@ class BluetoothGattClientManager(
                 Log.i(TAG, "Client: MTU changed for $deviceAddress to $mtu with status $status")
 
                 if (status == BluetoothGatt.GATT_SUCCESS) {
-                    Log.i(TAG, "MTU successfully negotiated for $deviceAddress. Discovering services.")
-                    
+                    Log.i(TAG, "MTU successfully negotiated for $deviceAddress to $mtu. Requesting LE 2M PHY.")
+                    // Request LE 2M PHY — doubles raw BLE throughput (2 Mbps vs 1 Mbps).
+                    gatt.setPreferredPhy(
+                        BluetoothDevice.PHY_LE_2M_MASK,
+                        BluetoothDevice.PHY_LE_2M_MASK,
+                        BluetoothDevice.PHY_OPTION_NO_PREFERRED
+                    )
+
                     // Now that MTU is set, connection is fully ready.
                     val deviceConn = BluetoothConnectionTracker.DeviceConnection(
                         device = gatt.device,
@@ -483,7 +497,17 @@ class BluetoothGattClientManager(
                 }
             }
 
-            override fun onServicesDiscovered(gatt: BluetoothGatt, status: Int) {                
+            override fun onServicesDiscovered(gatt: BluetoothGatt, status: Int) {
+                val addr = gatt.device.address
+                val phyName = fun(phy: Int) = when (phy) {
+                    BluetoothDevice.PHY_LE_1M -> "1M"
+                    BluetoothDevice.PHY_LE_2M -> "2M"
+                    BluetoothDevice.PHY_LE_CODED -> "Coded"
+                    else -> "unknown($phy)"
+                }
+                gatt.readPhy()  // trigger onPhyRead for logging
+                Log.d(TAG, "Client: Services discovered for $addr (PHY query pending)")
+
                 if (status == BluetoothGatt.GATT_SUCCESS) {
                     val service = gatt.getService(AppConstants.Mesh.Gatt.SERVICE_UUID)
                     if (service != null) {

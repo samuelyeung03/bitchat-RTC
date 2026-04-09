@@ -38,7 +38,7 @@ object AppConstants {
 
     object Fragmentation {
         const val FRAGMENT_SIZE_THRESHOLD: Int = 512
-        const val MAX_FRAGMENT_SIZE: Int = 469
+        const val MAX_FRAGMENT_SIZE: Int = 500  // MTU=517 → 514 usable; 500 + overhead fits
         const val FRAGMENT_TIMEOUT_MS: Long = 30_000L
         const val CLEANUP_INTERVAL_MS: Long = 10_000L
     }

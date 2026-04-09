@@ -284,10 +284,19 @@ object BinaryProtocol {
             buffer.rewind()
             buffer.get(result)
             
-            // Apply padding to standard block sizes for traffic analysis resistance
+            // Apply padding to standard block sizes for traffic analysis resistance.
+            // Skip padding for VIDEO / FRAGMENT packets — they are latency-sensitive and
+            // padding wastes scarce BLE bandwidth without meaningful privacy benefit.
+            val packetType = MessageType.fromValue(packet.type)
+            val skipPadding = packetType == MessageType.VIDEO
+                    || packetType == MessageType.FRAGMENT
+                    || packetType == MessageType.VIDEO_ACK
+            if (skipPadding) {
+                return result
+            }
             val optimalSize = MessagePadding.optimalBlockSize(result.size)
             val paddedData = MessagePadding.pad(result, optimalSize)
-            
+
             return paddedData
             
         } catch (e: Exception) {

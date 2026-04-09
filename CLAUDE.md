@@ -1,5 +1,8 @@
 # BitChat-RTC — Claude Working Notes
 
+> **Claude: read this file at the start of every session and after every meaningful change. Keep it up to date — it is your primary source of truth for this project.**
+
+
 ## Project overview
 Android peer-to-peer chat + voice/video app using **Bluetooth LE mesh** as the sole transport.
 No internet required. Devices discover each other via BLE scan/advertise, exchange messages,
@@ -38,19 +41,16 @@ Both devices run Android on Raspberry Pi 5. Always connected via USB-ADB.
 - `dace_jni.cpp` — x264 DACE encoder; `param.dace=1` enables DACE, `param.dace=0` disables
 - `RTCConnectionManager` — orchestrates audio + video encode/send/recv/decode
 - Default: 320×240 @ 15 fps, 100 kbps, **`param.dace=1` + `dace_complexity_level=-1` (auto)**
+- DACE CL range: **-1 (auto) and 0–9** (fixed)
 - DACE OFF = `param.dace=0` (do NOT change analysis params, just flip the flag)
 - DACE auto ON = `param.dace=1`, `dace_complexity_level=-1`
 - Fixed CL = `param.dace=1`, `dace_complexity_level=0..9`
 
-### PSNR test infrastructure (native, TCP-based)
+### Test infrastructure
 Located in `test/`:
-- `dace_hw_bench` — C binary already pushed to both Pi5s under `/data/local/tmp/`
-- `dace_compare.py` — runs DACE on/off + CL sweep over **TCP** between Pi1 (cam) and Pi2
-- `dace_psnr_bench` — PSNR bench binary also on devices
-- Previous results: `/data/local/tmp/sender_*.csv`, `receiver_*.csv`
-
-> The TCP bench (`dace_compare.py`) is a **separate baseline**, not through BLE mesh.
-> Goal: route video through actual BLE mesh and get equivalent PSNR numbers.
+- `encode_bench.py` — encode-only benchmark; runs on Pi1 only, no BLE needed. Reads SEND logcat for PSNR + encode time per CL. Supports `--src` YUV file.
+- `ble_psnr_test.py` — full BLE mesh test; measures PSNR, encode time, and end-to-end latency. Supports `--src` YUV file.
+- `media/` — YUV test files: `complex_320x240.yuv`, `complex_640x360.yuv`, `complex_1920x1080.yuv`
 
 ---
 
@@ -127,8 +127,13 @@ adb -s f501a6221ec14252 install -r app/build/outputs/apk/debug/app-debug.apk
 
 ### ADB test commands
 ```bash
-python3 test/ble_psnr_test.py --duration 30 --cls -1 0 1 2 3 4 5  # full sweep
-python3 test/ble_psnr_test.py --duration 30 --cls -1 0             # quick DACE on/off
+# Encode-only (Pi1 only, no BLE needed)
+python3 test/encode_bench.py --src /data/local/tmp/complex_320x240.yuv             # full sweep: auto + CL0-9
+python3 test/encode_bench.py --src /data/local/tmp/complex_320x240.yuv --cls -1 0  # quick DACE on/off
+
+# BLE mesh end-to-end
+python3 test/ble_psnr_test.py --src /data/local/tmp/complex_320x240.yuv --duration 20  # full sweep
+python3 test/ble_psnr_test.py --duration 30 --cls -1 0  # quick, live camera
 ```
 
 ### Known hardware issue
@@ -136,7 +141,7 @@ python3 test/ble_psnr_test.py --duration 30 --cls -1 0             # quick DACE 
 - Staggered startup required: start Pi1 first, wait 8s, then start Pi2 so Pi2 scans and finds Pi1.
 
 ## User preferences
-- Do NOT use the TCP bench as a substitute for BLE-mesh testing
+- Use `encode_bench.py` for fast encoder-only sweeps; use `ble_psnr_test.py` for full end-to-end BLE tests
 - Commit after each meaningful change
 - Be concise — no summaries, no preamble
 - DACE param: `param.dace = 0/1` is the on/off switch; `dace_complexity_level = -1` = truly auto
