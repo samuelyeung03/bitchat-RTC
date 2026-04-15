@@ -47,11 +47,11 @@ Java_com_bitchat_android_rtc_DACEWrapper_nativeCreateEncoder(
     ctx->param.i_fps_num  = (uint32_t)fps;
     ctx->param.i_fps_den  = 1;
 
-    // Rate control: constant bitrate (kbps input converted to bps)
-    ctx->param.rc.i_rc_method  = X264_RC_ABR;
-    ctx->param.rc.i_bitrate    = bitrate / 1000;   // x264 expects kbps
-    ctx->param.rc.i_vbv_max_bitrate = bitrate / 1000;
-    ctx->param.rc.i_vbv_buffer_size = bitrate / 500; // ~2-second VBV buffer
+    // Rate control
+    ctx->param.rc.i_rc_method      = X264_RC_ABR;
+    ctx->param.rc.i_bitrate        = bitrate / 1000;   // x264 expects kbps
+    ctx->param.rc.i_vbv_max_bitrate = 0;   // no VBV cap — instant output (VBV causes multi-second buffering at low fps)
+    ctx->param.rc.i_vbv_buffer_size = 0;   // disable VBV delay
 
     // Low-latency encoding: no B-frames, no lookahead
     ctx->param.i_bframe             = 0;
@@ -63,13 +63,28 @@ Java_com_bitchat_android_rtc_DACEWrapper_nativeCreateEncoder(
     ctx->param.b_repeat_headers     = 1;  // SPS/PPS in every IDR
     ctx->param.b_annexb             = 1;
 
-    // DACE: enable adaptive complexity encoding
-    // complexity_level = -1 → auto (DACE self-regulates based on frame timing)
-    // complexity_level >= 0 → fixed level (for benchmarking CL0..CL9)
-    ctx->param.i_threads             = 1;
-    ctx->param.dace                  = 1;
-    ctx->param.dace_complexity_level = complexityLevel; // -1=auto, 0-9=fixed
-    ctx->param.analyse.b_psnr        = 1; // enable x264 luma PSNR in picOut.prop
+    // DACE: enable or disable adaptive complexity encoding.
+    // complexityLevel == -99 → DACE OFF (param.dace=0, plain x264 at CL0 analysis settings)
+    // complexityLevel == -1  → DACE ON, auto (self-regulates based on frame timing)
+    // complexityLevel >= 0   → DACE ON, fixed level (for benchmarking CL0..CL9)
+    ctx->param.i_threads = 1;
+    if (complexityLevel == -99) {
+        // DACE OFF: plain x264 with fast/low-complexity preset matching CL0 effort
+        ctx->param.dace                       = 0;
+        ctx->param.analyse.i_trellis          = 0;
+        ctx->param.analyse.inter              = X264_ANALYSE_I4x4 | X264_ANALYSE_I8x8;
+        ctx->param.analyse.i_me_method        = X264_ME_DIA;
+        ctx->param.analyse.i_subpel_refine    = 1;
+        ctx->param.analyse.b_mixed_references = 0;
+        ctx->param.analyse.b_chroma_me        = 0;
+        ctx->param.analyse.i_me_range         = 16;
+        ctx->param.analyse.b_fast_pskip       = 1;
+        ctx->param.b_deblocking_filter        = 0;
+    } else {
+        ctx->param.dace                  = 1;
+        ctx->param.dace_complexity_level = complexityLevel; // -1=auto, 0-9=fixed
+    }
+    ctx->param.analyse.b_psnr = 1; // enable x264 luma PSNR in picOut.prop
 
     ctx->width         = width;
     ctx->height        = height;
@@ -84,8 +99,9 @@ Java_com_bitchat_android_rtc_DACEWrapper_nativeCreateEncoder(
         return 0L;
     }
 
-    const char* mode = (complexityLevel < 0) ? "auto" : "fixed";
-    LOGI("DACE encoder created: %dx%d @%dfps %dbps complexity=%s(%d)",
+    const char* mode = (complexityLevel == -99) ? "off" :
+                       (complexityLevel ==  -1) ? "auto" : "fixed";
+    LOGI("DACE encoder created: %dx%d @%dfps %dbps dace=%s cl=%d",
          width, height, fps, bitrate, mode, complexityLevel);
     return reinterpret_cast<jlong>(ctx);
 }
@@ -148,6 +164,7 @@ Java_com_bitchat_android_rtc_DACEWrapper_nativeEncodeFrame(
         return nullptr;
     }
     if (frameSize == 0 || nalCount == 0) {
+        LOGI("x264_encoder_encode: frameSize=%d nalCount=%d (buffered/lookahead)", frameSize, nalCount);
         return nullptr;  // buffered frame, nothing to send yet
     }
 

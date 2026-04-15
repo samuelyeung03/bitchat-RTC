@@ -466,14 +466,17 @@ class RTCConnectionManager(
     }
 
     private fun sendEncodedVideoFrame(yuv420: ByteArray, recipientId: String?) {
-        val enc = videoEncoder ?: return
+        val enc = videoEncoder ?: run { Log.w(TAG, "sendEncodedVideoFrame: no encoder"); return }
         val seq = videoSeqNumber and 0xFFFF
         videoFrameCount++
 
-        // Periodic keyframe every KEYFRAME_INTERVAL_FRAMES frames
         val forceKey = (videoFrameCount % AppConstants.Dace.KEYFRAME_INTERVAL_FRAMES) == 1
+        Log.d(TAG, "sendEncodedVideoFrame: seq=$seq forceKey=$forceKey yuv=${yuv420.size}")
 
-        val nalBytes = enc.encode(yuv420, forceKey) ?: return
+        val nalBytes = enc.encode(yuv420, forceKey) ?: run {
+            Log.w(TAG, "sendEncodedVideoFrame: encode returned null for seq=$seq")
+            return
+        }
 
         // 2-byte sequence header + NAL data
         val payload = ByteArray(nalBytes.size + 2)

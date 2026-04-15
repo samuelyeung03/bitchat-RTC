@@ -38,7 +38,9 @@ object AppConstants {
 
     object Fragmentation {
         const val FRAGMENT_SIZE_THRESHOLD: Int = 512
-        const val MAX_FRAGMENT_SIZE: Int = 500  // MTU=517 → 514 usable; 500 + overhead fits
+        // Reduced from 500 to fit 256B MTU (phones): 180 payload + ~50B BitchatPacket headers < 256
+        // Pi5s with MTU=517 can use larger: 180 still works, just more fragments
+        const val MAX_FRAGMENT_SIZE: Int = 180
         const val FRAGMENT_TIMEOUT_MS: Long = 30_000L
         const val CLEANUP_INTERVAL_MS: Long = 10_000L
     }

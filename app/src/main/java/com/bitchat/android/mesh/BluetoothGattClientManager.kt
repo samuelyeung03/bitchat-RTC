@@ -16,6 +16,9 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import java.util.*
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.Semaphore
+import kotlinx.coroutines.sync.withLock
 import com.bitchat.android.ui.debug.DebugSettingsManager
 import com.bitchat.android.ui.debug.DebugScanResult
 
@@ -33,6 +36,27 @@ class BluetoothGattClientManager(
     
     companion object {
         private const val TAG = "BluetoothGattClientManager"
+    }
+
+    // Per-device write flow control: only one in-flight GATT write per device at a time.
+    private val writePermits     = mutableMapOf<String, Semaphore>()
+    private val writePermitsLock = Mutex()
+
+    /** Called by BluetoothPacketBroadcaster before each client write. Blocks until the
+     *  previous write's onCharacteristicWrite callback has fired. */
+    suspend fun awaitWritePermit(deviceAddress: String) {
+        val permit = writePermitsLock.withLock {
+            writePermits.getOrPut(deviceAddress) { Semaphore(1) }
+        }
+        permit.acquire()
+    }
+
+    private suspend fun releaseWritePermit(deviceAddress: String) {
+        writePermitsLock.withLock { writePermits[deviceAddress]?.release() }
+    }
+
+    private suspend fun removeWritePermit(deviceAddress: String) {
+        writePermitsLock.withLock { writePermits.remove(deviceAddress) }
     }
     
     // Core Bluetooth components
@@ -58,7 +82,30 @@ class BluetoothGattClientManager(
 
     // Scan management
     private var scanCallback: ScanCallback? = null
-    
+
+    /**
+     * When non-null, the scan callback will ONLY attempt to connect to this address.
+     * Set via ADB `connect_to` to pin the client to a single peer and stop the
+     * 133-flood caused by attempting every advertising device.
+     * Set back to null via `start_scan` to restore normal operation.
+     */
+    @Volatile var scanAllowlist: Set<String>? = null
+
+    /** Stop scanning AND restrict connections to [address] only. */
+    fun pinToAddress(address: String) {
+        scanAllowlist = setOf(address.uppercase())
+        stopScanning()
+        connectToAddress(address)
+        Log.i(TAG, "Pinned to $address — auto-scanning suppressed")
+    }
+
+    /** Restore normal multi-peer scanning. */
+    fun unpinAddress() {
+        scanAllowlist = null
+        startScanning()
+        Log.i(TAG, "Unpinned — resuming normal scan")
+    }
+
     // Scan rate limiting to prevent "scanning too frequently" errors
     private var lastScanStartTime = 0L
     private var lastScanStopTime = 0L
@@ -198,7 +245,7 @@ class BluetoothGattClientManager(
      * Start scanning with rate limiting
      */
     @Suppress("DEPRECATION")
-    private fun startScanning() {
+    fun startScanning() {
         // Respect debug setting
         val enabled = try { com.bitchat.android.ui.debug.DebugSettingsManager.getInstance().gattClientEnabled.value } catch (_: Exception) { true }
         if (!permissionManager.hasBluetoothPermissions() || bleScanner == null || !isActive || !enabled) return
@@ -288,7 +335,7 @@ class BluetoothGattClientManager(
      * Stop scanning
      */
     @Suppress("DEPRECATION")
-    private fun stopScanning() {
+    fun stopScanning() {
         if (!permissionManager.hasBluetoothPermissions() || bleScanner == null) return
         
         if (isCurrentlyScanning) {
@@ -314,10 +361,16 @@ class BluetoothGattClientManager(
         val rssi = result.rssi
         val deviceAddress = device.address
         val scanRecord = result.scanRecord
-        
+
         // CRITICAL: Only process devices that have our service UUID
         val hasOurService = scanRecord?.serviceUuids?.any { it.uuid == AppConstants.Mesh.Gatt.SERVICE_UUID } == true
         if (!hasOurService) {
+            return
+        }
+
+        // If pinned to a specific address, ignore all others.
+        val allowlist = scanAllowlist
+        if (allowlist != null && deviceAddress.uppercase() !in allowlist) {
             return
         }
 
@@ -397,6 +450,9 @@ class BluetoothGattClientManager(
                 if (status == BluetoothGatt.GATT_SUCCESS) {
                     Log.d(TAG, "Client: Characteristic write successful to $deviceAddress")
 
+                    // Release flow-control permit so next fragment can be sent.
+                    connectionScope.launch { releaseWritePermit(deviceAddress) }
+
                     // If this write was a ping packet, try to record RTT (best-effort)
                     try {
                         val charValue = characteristic?.value
@@ -420,6 +476,8 @@ class BluetoothGattClientManager(
                         TAG,
                         "Client: Characteristic write failed to $deviceAddress, status: $status"
                     )
+                    // Release permit even on failure so sender doesn't deadlock.
+                    connectionScope.launch { releaseWritePermit(deviceAddress) }
                 }
             }
             override fun onPhyUpdate(gatt: BluetoothGatt, txPhy: Int, rxPhy: Int, status: Int) {
@@ -456,6 +514,8 @@ class BluetoothGattClientManager(
                     delegate?.onDeviceDisconnected(gatt.device)
 
                     connectionScope.launch {
+                        // Clean up write permit for this device on disconnect.
+                        removeWritePermit(deviceAddress)
                         delay(500) // CLEANUP_DELAY
                         try {
                             gatt.close()

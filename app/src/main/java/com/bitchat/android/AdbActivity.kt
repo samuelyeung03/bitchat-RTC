@@ -86,6 +86,52 @@ class AdbActivity : Activity() {
                 ms.rtcConnectionManager.setVideoComplexity(cl)
             }
 
+            "stop_client" -> {
+                Log.i(TAG, "stop_client")
+                ms.stopClient()
+            }
+
+            "start_client" -> {
+                Log.i(TAG, "start_client")
+                ms.startClient()
+            }
+
+            "stop_server" -> {
+                Log.i(TAG, "stop_server")
+                ms.stopServer()
+            }
+
+            "start_server" -> {
+                Log.i(TAG, "start_server")
+                ms.startServer()
+            }
+
+            "stop_scan" -> {
+                Log.i(TAG, "stop_scan")
+                ms.stopScan()
+            }
+
+            "start_scan" -> {
+                Log.i(TAG, "start_scan")
+                ms.startScan()
+            }
+
+            // connect_to --es addr <BLE_MAC>  — pin to one peer, stop scan flood
+            "connect_to" -> {
+                val addr = intent.getStringExtra("addr")
+                if (addr.isNullOrBlank()) {
+                    Log.e(TAG, "ERROR connect_to requires --es addr <BLE_MAC>")
+                } else {
+                    Log.i(TAG, "connect_to addr=$addr")
+                    ms.pinToAddress(addr)
+                }
+            }
+
+            "unpin" -> {
+                Log.i(TAG, "unpin — resuming normal scan")
+                ms.unpinAddress()
+            }
+
             else -> Log.w(TAG, "UNKNOWN cmd=$cmd")
         }
 

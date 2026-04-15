@@ -75,7 +75,12 @@ class BluetoothConnectionManager(
     private val clientManager = BluetoothGattClientManager(
         context, connectionScope, connectionTracker, permissionManager, powerManager, componentDelegate
     )
-    
+
+    init {
+        // Wire per-device write flow control after clientManager is initialized.
+        packetBroadcaster.setClientWriteAwaiter { addr -> clientManager.awaitWritePermit(addr) }
+    }
+
     // Service state
     private var isActive = false
     
@@ -275,6 +280,10 @@ class BluetoothConnectionManager(
     fun stopServer() { connectionScope.launch { serverManager.stop() } }
     fun startClient() { connectionScope.launch { clientManager.start() } }
     fun stopClient() { connectionScope.launch { clientManager.stop() } }
+    fun stopScan()   { connectionScope.launch { clientManager.stopScanning() } }
+    fun startScan()  { connectionScope.launch { clientManager.startScanning() } }
+    fun pinToAddress(addr: String) { clientManager.pinToAddress(addr) }
+    fun unpinAddress() { clientManager.unpinAddress() }
 
     // Inject nickname resolver for broadcaster logs
     fun setNicknameResolver(resolver: (String) -> String?) { packetBroadcaster.setNicknameResolver(resolver) }

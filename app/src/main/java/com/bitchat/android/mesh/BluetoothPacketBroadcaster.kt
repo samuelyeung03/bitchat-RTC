@@ -58,6 +58,14 @@ class BluetoothPacketBroadcaster(
     fun setNicknameResolver(resolver: (String) -> String?) {
         nicknameResolver = resolver
     }
+
+    // Flow control hook: called before each client (GATT write) fragment.
+    // Set to BluetoothGattClientManager::awaitWritePermit by BluetoothConnectionManager.
+    private var clientWriteAwaiter: (suspend (deviceAddress: String) -> Unit)? = null
+
+    fun setClientWriteAwaiter(awaiter: suspend (deviceAddress: String) -> Unit) {
+        clientWriteAwaiter = awaiter
+    }
     
     /**
      * Debug logging helper - can be easily removed/disabled for production
@@ -154,17 +162,42 @@ class BluetoothPacketBroadcaster(
                 }
                 val job = connectionScope.launch {
                     var sent = 0
-                    fragments.forEach { fragment ->
-                        if (!isActive) return@launch
-                        // If cancelled, stop sending remaining fragments
-                        if (transferId != null && transferJobs[transferId]?.isCancelled == true) return@launch
-                        broadcastSinglePacket(RoutedPacket(fragment, transferId = transferId), gattServer, characteristic)
-                        // 20ms delay between fragments
-                        delay(20)
-                        if (transferId != null) {
-                            sent += 1
-                            TransferProgressManager.progress(transferId, sent, fragments.size)
-                            if (sent == fragments.size) TransferProgressManager.complete(transferId, fragments.size)
+                    // Determine client-side targets (we are the GATT central writing to them).
+                    // We need their device address to gate flow control per-device.
+                    val clientTargets = connectionTracker.getConnectedDevices().values
+                        .filter { it.isClient && it.gatt != null && it.characteristic != null }
+
+                    if (clientTargets.isEmpty()) {
+                        // Server-notify path: no write-callback flow control needed.
+                        fragments.forEach { fragment ->
+                            if (!isActive) return@launch
+                            if (transferId != null && transferJobs[transferId]?.isCancelled == true) return@launch
+                            broadcastSinglePacket(RoutedPacket(fragment, transferId = transferId), gattServer, characteristic)
+                            delay(20)
+                            if (transferId != null) {
+                                sent += 1
+                                TransferProgressManager.progress(transferId, sent, fragments.size)
+                                if (sent == fragments.size) TransferProgressManager.complete(transferId, fragments.size)
+                            }
+                        }
+                    } else {
+                        // Client-write path: await write callback before sending next fragment.
+                        val awaiter = clientWriteAwaiter
+                        fragments.forEach { fragment ->
+                            if (!isActive) return@launch
+                            if (transferId != null && transferJobs[transferId]?.isCancelled == true) return@launch
+                            // Gate each client device before writing.
+                            if (awaiter != null) {
+                                clientTargets.forEach { conn ->
+                                    try { awaiter(conn.device.address) } catch (_: Exception) { }
+                                }
+                            }
+                            broadcastSinglePacket(RoutedPacket(fragment, transferId = transferId), gattServer, characteristic)
+                            if (transferId != null) {
+                                sent += 1
+                                TransferProgressManager.progress(transferId, sent, fragments.size)
+                                if (sent == fragments.size) TransferProgressManager.complete(transferId, fragments.size)
+                            }
                         }
                     }
                 }
@@ -255,15 +288,20 @@ class BluetoothPacketBroadcaster(
         noResponse: Boolean = false
     ): Boolean {
         // Server-side (we are the peripheral, peer subscribed via notification/indication)
-        val serverTarget = connectionTracker.getSubscribedDevices()
-            .firstOrNull { connectionTracker.addressPeerMap[it.address] == targetPeerID }
+        val subscribedList = connectionTracker.getSubscribedDevices()
+        val connectedMap   = connectionTracker.getConnectedDevices()
+        val serverTarget = subscribedList.firstOrNull { connectionTracker.addressPeerMap[it.address] == targetPeerID }
+        // Find client-side connection that has a characteristic (service discovery completed).
+        val clientTarget = connectedMap.values.firstOrNull {
+            connectionTracker.addressPeerMap[it.device.address] == targetPeerID && it.characteristic != null
+        }
+        Log.d(TAG, "sendDataToPeer $targetPeerID: subs=${subscribedList.size} serverTarget=${serverTarget?.address} clientTarget=${clientTarget?.device?.address} clientChar=${clientTarget?.characteristic != null}")
         if (serverTarget != null && notifyDevice(serverTarget, data, gattServer, characteristic, confirm = !noResponse)) return true
 
         // Client-side (we are the central, write to peer's characteristic)
-        val clientTarget = connectionTracker.getConnectedDevices().values
-            .firstOrNull { connectionTracker.addressPeerMap[it.device.address] == targetPeerID }
         if (clientTarget != null && writeToDeviceConn(clientTarget, data, noResponse)) return true
 
+        Log.d(TAG, "sendDataToPeer $targetPeerID: no delivery path — dropping")
         return false
     }
 
@@ -437,6 +475,7 @@ class BluetoothPacketBroadcaster(
                 else
                     BluetoothGattCharacteristic.WRITE_TYPE_DEFAULT
                 val result = deviceConn.gatt?.writeCharacteristic(char) ?: false
+                Log.d(TAG, "writeToDeviceConn ${deviceConn.device.address} noResponse=$noResponse size=${data.size} result=$result")
                 result
             } ?: false
         } catch (e: Exception) {

@@ -740,6 +740,16 @@ class BluetoothMeshService(private val context: Context) {
     fun getConnectedPeers(): Map<String, String> =
         peerManager.getVerifiedPeers().mapValues { it.value.nickname }
 
+    fun stopClient()  = connectionManager.stopClient()
+    fun startClient() = connectionManager.startClient()
+    fun stopServer()  = connectionManager.stopServer()
+    fun startServer() = connectionManager.startServer()
+    fun stopScan()    = connectionManager.stopScan()
+    fun startScan()   = connectionManager.startScan()
+    fun connectTo(address: String) = connectionManager.connectToAddress(address)
+    fun pinToAddress(address: String) = connectionManager.pinToAddress(address)
+    fun unpinAddress() = connectionManager.unpinAddress()
+
     fun stopServices() {
         if (!isActive) {
             Log.w(TAG, "Mesh service not active, ignoring stop request")
