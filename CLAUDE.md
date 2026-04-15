@@ -16,12 +16,34 @@ voice, and video over fragmented GATT packets.
 ---
 
 ## Hardware setup
-| Role | ADB serial | Notes |
-|------|-----------|-------|
-| Pi 5 #1 (sender) | `798f51f064cce0d1` | Razer Kiyo X on `/dev/video0` |
-| Pi 5 #2 (receiver) | `f501a6221ec14252` | no camera |
+| Role | ADB serial | Device | Notes |
+|------|-----------|--------|-------|
+| Pi 5 #1 (sender) | `798f51f064cce0d1` | RPi5/AOSP | Razer Kiyo X on `/dev/video0` |
+| Pi 5 #2 (receiver) | `f501a6221ec14252` | RPi5/AOSP | no camera |
+| Phone sender | `T1AIOC656909KGK` | ASUS ROG Phone 9 (AI2501C) | YUV file or camera |
+| Phone receiver | `dc1c0ad` | Redmi Note 7 (lavender) | Android 9, MTU=256 |
 
-Both devices run Android on Raspberry Pi 5. Always connected via USB-ADB.
+Both Pis run AOSP 16 (eng.samuel). Phones run stock Android.
+YUV test file on ASUS: `/data/local/tmp/complex_320x240.yuv` (push from `test/media/`).
+
+**CRITICAL — debug prefs:** `bitchat_debug_settings.xml` persists across installs (not cleared on uninstall on rooted devices). After any `stop_client`/`stop_server` ADB command, these prefs are written and survive restart, silently breaking the mesh. Always reset after testing:
+```bash
+cat > /tmp/debug_prefs.xml << 'XML'
+<?xml version='1.0' encoding='utf-8' standalone='yes' ?>
+<map>
+    <int name="max_connections_client" value="8" />
+    <boolean name="gatt_client_enabled" value="true" />
+    <boolean name="gatt_server_enabled" value="true" />
+    <boolean name="verbose_logging" value="true" />
+    <int name="max_connections_server" value="8" />
+    <int name="max_connections_overall" value="8" />
+</map>
+XML
+for S in T1AIOC656909KGK dc1c0ad; do
+  adb -s $S push /tmp/debug_prefs.xml /data/local/tmp/debug_prefs.xml
+  adb -s $S shell "run-as com.bitchat.droid cp /data/local/tmp/debug_prefs.xml /data/data/com.bitchat.droid/shared_prefs/bitchat_debug_settings.xml"
+done
+```
 
 ---
 
@@ -66,10 +88,8 @@ done
 # Launch app
 adb -s <serial> shell am start -n com.bitchat.droid/com.bitchat.android.MainActivity
 
-# Send ADB command to the app (via AdbCommandReceiver — see below)
-adb -s <serial> shell am broadcast \
-    -a com.bitchat.droid.CMD \
-    -n com.bitchat.droid/.AdbCommandReceiver \
+# ADB command interface (AdbActivity — zero-UI, am start)
+adb -s <serial> shell am start -n com.bitchat.droid/com.bitchat.android.AdbActivity \
     --es cmd <COMMAND> [extras]
 
 # BLE-specific logcat
@@ -77,14 +97,22 @@ adb -s <serial> shell logcat -s BluetoothMeshService BluetoothConnectionManager 
     BluetoothGattClientManager BluetoothGattServerManager PeerManager RTCConnectionManager
 ```
 
-## AdbCommandReceiver commands
+## AdbActivity commands
 | cmd | extra args | what it does |
 |-----|-----------|--------------|
-| `peer_id` | — | logs local peer ID to logcat tag `ADB_CMD` |
-| `start_video` | `--es peer_id <hex>` | calls `rtcConnectionManager.startVideo(...)` |
-| `stop_video` | — | calls `rtcConnectionManager.stopVideo()` |
-| `start_bench_recv` | — | (future) enable bench receiver mode |
-| `start_bench_send` | `--es peer_id <hex>` `--ez dace_on true/false` `--ei frames 150` | (future) start bench sender |
+| `peer_id` | — | logs local peer ID → `ADB_CMD:I  PEER_ID <hex>` |
+| `peers` | — | logs all verified peers → `ADB_CMD:I  PEER id=<hex> nick=<nick>` |
+| `start_video` | `--es peer_id <hex>` `--ei cl <-99/-1/0-9>` `--ei fps <n>` [`--es src <path>` `--ei w <w>` `--ei h <h>`] | start DACE video; cl=-99=OFF, cl=-1=DACE auto, cl=0-9=fixed |
+| `stop_video` | — | stop video |
+| `set_complexity` | `--ei cl <-1..9>` | change CL on running encoder |
+| `stop_client` | — | stop BLE client (scanner) |
+| `start_client` | — | start BLE client |
+| `stop_server` | — | stop BLE server (advertiser) |
+| `start_server` | — | start BLE server |
+| `stop_scan` | — | stop BLE scanning only |
+| `start_scan` | — | start BLE scanning only |
+| `connect_to` | `--es addr <BLE_MAC>` | pin to single peer, stop scan flood (use to avoid 133 errors) |
+| `unpin` | — | resume normal multi-peer scanning |
 
 ---
 
@@ -92,11 +120,40 @@ adb -s <serial> shell logcat -s BluetoothMeshService BluetoothConnectionManager 
 ```bash
 cd bitchat-RTC
 ./gradlew assembleDebug
+adb -s T1AIOC656909KGK install -r app/build/outputs/apk/debug/app-debug.apk
+adb -s dc1c0ad install -r app/build/outputs/apk/debug/app-debug.apk
+# Pi5s (when connected):
 adb -s 798f51f064cce0d1 install -r app/build/outputs/apk/debug/app-debug.apk
 adb -s f501a6221ec14252 install -r app/build/outputs/apk/debug/app-debug.apk
 ```
 
-## Test results (2026-04-08, BLE mesh, 320×240 @5fps, 100kbps)
+## Test results (2026-04-16, phones, BLE mesh, 320×240 @3fps, 100kbps)
+
+### DACE ON vs OFF — ASUS ROG9 → Redmi Note 7
+
+| Mode      | SEND | RECV | PSNR avg | Enc avg |
+|-----------|------|------|----------|---------|
+| DACE ON (auto, cl=-1) | 90 | 1 | 30.0 dB | 42 ms |
+| DACE OFF (cl=-99)     | 90 | 0 | 29.8 dB | 5 ms |
+
+**Notes:**
+- RECV very low (fragment loss) — each 3KB frame = ~28 fragments at 180B/fragment.
+  At 3fps, ~84 fragments/s exceeds sustained BLE throughput on Redmi Note 7.
+- DACE ON: 42ms encode (adapting to scene complexity on Snapdragon 8 Gen3)
+- DACE OFF: 5ms encode (plain x264 CL0 settings, 8× faster)
+- PSNR difference ~0.25 dB — negligible; DACE effect on quality is bitrate-limited
+- **Next step**: lower bitrate to 20-40kbps (→ ~600-1200B/frame = 4-8 fragments) for reliable delivery
+
+### Known phone-specific issues (vs Pi5s)
+- **MTU=256** on phones (vs MTU=517 on Pi5s) → `MAX_FRAGMENT_SIZE` must be ≤180B (not 500B)
+- **VBV buffering**: x264 buffers output until VBV buffer fills. Set `i_vbv_buffer_size=0` (disabled)
+  to get immediate frame output. On Pi5s the VBV buffer filled fast enough to be invisible.
+- **Debug prefs corruption**: `stop_client`/`stop_server` ADB commands persist prefs
+  (`max_connections=1`, `gatt_client_enabled=false`) across restarts. Always reset (see above).
+- **BLE status 133 flood**: random BLE addressing causes many failed connect attempts.
+  Use `connect_to --es addr <MAC>` to pin to one peer after scanning briefly.
+
+## Test results (2026-04-08, Pi5, BLE mesh, 320×240 @5fps, 100kbps)
 
 ### Encoder-side PSNR + timing (definitive, all CLs)
 
@@ -141,7 +198,11 @@ python3 test/ble_psnr_test.py --duration 30 --cls -1 0  # quick, live camera
 - Staggered startup required: start Pi1 first, wait 8s, then start Pi2 so Pi2 scans and finds Pi1.
 
 ## User preferences
-- Use `encode_bench.py` for fast encoder-only sweeps; use `ble_psnr_test.py` for full end-to-end BLE tests
-- Commit after each meaningful change
 - Be concise — no summaries, no preamble
-- DACE param: `param.dace = 0/1` is the on/off switch; `dace_complexity_level = -1` = truly auto
+- Commit after each meaningful change
+- DACE param: `param.dace=0/1` is on/off switch; `dace_complexity_level=-1` = truly auto
+- cl=-99 via ADB = DACE OFF (sentinel value → sets param.dace=0 in JNI)
+- Use `encode_bench.py` for fast encoder-only sweeps; use `ble_psnr_test.py` for full BLE end-to-end
+- Prefer `--src /data/local/tmp/complex_320x240.yuv` over camera for reproducible results
+- After ADB stop_client/stop_server, ALWAYS reset debug prefs (see Hardware setup section)
+- ble_psnr_test.py: use `--sender`/`--receiver` for phone serials; script auto-detects peer ID
