@@ -127,22 +127,23 @@ adb -s 798f51f064cce0d1 install -r app/build/outputs/apk/debug/app-debug.apk
 adb -s f501a6221ec14252 install -r app/build/outputs/apk/debug/app-debug.apk
 ```
 
-## Test results (2026-04-16, phones, BLE mesh, 320×240 @3fps, 100kbps)
+## Test results (2026-04-16, phones, BLE mesh, 320×240 @3fps, 40kbps, psy off)
 
 ### DACE ON vs OFF — ASUS ROG9 → Redmi Note 7
 
-| Mode      | SEND | RECV | PSNR avg | Enc avg |
-|-----------|------|------|----------|---------|
-| DACE ON (auto, cl=-1) | 90 | 1 | 30.0 dB | 42 ms |
-| DACE OFF (cl=-99)     | 90 | 0 | 29.8 dB | 5 ms |
+| Mode      | SEND | RECV | PSNR avg | SSIM avg | NAL avg | Enc avg |
+|-----------|------|------|----------|----------|---------|---------|
+| DACE ON (auto, cl=-1) | 90 | 10 | 27.2 dB | 0.754 | 1776 B | 34 ms |
+| DACE OFF (cl=-99)     | 90 |  2 | 26.5 dB | 0.732 | 1813 B |  3 ms |
 
 **Notes:**
-- RECV very low (fragment loss) — each 3KB frame = ~28 fragments at 180B/fragment.
-  At 3fps, ~84 fragments/s exceeds sustained BLE throughput on Redmi Note 7.
-- DACE ON: 42ms encode (adapting to scene complexity on Snapdragon 8 Gen3)
-- DACE OFF: 5ms encode (plain x264 CL0 settings, 8× faster)
-- PSNR difference ~0.25 dB — negligible; DACE effect on quality is bitrate-limited
-- **Next step**: lower bitrate to 20-40kbps (→ ~600-1200B/frame = 4-8 fragments) for reliable delivery
+- **PSNR/SSIM now objective**: psy-RD disabled (b_psy=0), so measurements are valid
+- DACE ON: +0.7 dB PSNR, +0.022 SSIM — measurable quality improvement
+- DACE ON: 10× slower encode (34ms vs 3ms) adapting to Snapdragon 8 Gen3
+- BLE throughput: ~43 kbps (matches 40kbps target — bitrate control is accurate)
+- RECV improved from 1-4/90 to 10/90 with flow control; still limited by fragment count
+- Each 1800B frame = ~12 fragments → P(deliver at p=15%) ≈ 14% — matches 10/90 (11%)
+- **Next step to raise RECV**: reduce bitrate further to 20kbps (→ 6 fragments → 40% delivery)
 
 ### Known phone-specific issues (vs Pi5s)
 - **MTU=256** on phones (vs MTU=517 on Pi5s) → `MAX_FRAGMENT_SIZE` must be ≤180B (not 500B)
@@ -152,6 +153,12 @@ adb -s f501a6221ec14252 install -r app/build/outputs/apk/debug/app-debug.apk
   (`max_connections=1`, `gatt_client_enabled=false`) across restarts. Always reset (see above).
 - **BLE status 133 flood**: random BLE addressing causes many failed connect attempts.
   Use `connect_to --es addr <MAC>` to pin to one peer after scanning briefly.
+- **WRITE_TYPE_NO_RESPONSE + flow control**: when `clientWriteAwaiter` is set, writes MUST use
+  `WRITE_TYPE_DEFAULT` — NO_RESPONSE writes never trigger `onCharacteristicWrite`, causing deadlock.
+- **Psy-RD**: disabled (`b_psy=0`) in dace_jni.cpp so PSNR/SSIM are objective metrics.
+  x264 warns "psnr used with psy on: results will be invalid" if psy is enabled alongside b_psnr.
+- **ADB_CMD logcat timing**: phones need 3-4s after `am start AdbActivity` before log appears.
+  Old 1.2s sleep from Pi5 code was insufficient — use 4s.
 
 ## Test results (2026-04-08, Pi5, BLE mesh, 320×240 @5fps, 100kbps)
 
