@@ -19,7 +19,8 @@ struct DaceEncoderCtx {
     x264_param_t  param;
     int           width;
     int           height;
-    double        last_psnr_y;    // luma PSNR from last encode (requires b_psnr=1)
+    double        last_psnr_y;    // luma PSNR from last encode
+    double        last_ssim_y;    // luma SSIM from last encode (0–1)
     int64_t       last_encode_us; // wall-clock duration of last x264_encoder_encode (µs)
 };
 
@@ -85,10 +86,17 @@ Java_com_bitchat_android_rtc_DACEWrapper_nativeCreateEncoder(
         ctx->param.dace_complexity_level = complexityLevel; // -1=auto, 0-9=fixed
     }
     ctx->param.analyse.b_psnr = 1; // enable x264 luma PSNR in picOut.prop
+    ctx->param.analyse.b_ssim = 1; // enable x264 luma SSIM in picOut.prop
+    // Disable psy-RD so PSNR/SSIM are objective (not distorted by psycho-visual opt).
+    // x264 warns "psnr used with psy on: results will be invalid" — this silences it.
+    ctx->param.analyse.b_psy              = 0;
+    ctx->param.analyse.f_psy_rd           = 0.0f;
+    ctx->param.analyse.f_psy_trellis      = 0.0f;
 
     ctx->width         = width;
     ctx->height        = height;
     ctx->last_psnr_y   = 0.0;
+    ctx->last_ssim_y   = 0.0;
     ctx->last_encode_us = 0;
 
     ctx->enc = x264_encoder_open(&ctx->param);
@@ -154,7 +162,8 @@ Java_com_bitchat_android_rtc_DACEWrapper_nativeEncodeFrame(
     env->ReleaseByteArrayElements(yuv420, yuvData, 0);
 
     if (frameSize > 0 && nalCount > 0) {
-        ctx->last_psnr_y    = (double)picOut.prop.f_psnr[0];
+        ctx->last_psnr_y    = (double)picOut.prop.f_psnr[0];   // Y-plane PSNR
+        ctx->last_ssim_y    = (double)picOut.prop.f_ssim;       // luma SSIM (scalar)
         ctx->last_encode_us = (int64_t)(t1.tv_sec  - t0.tv_sec)  * 1000000LL
                             + (int64_t)(t1.tv_nsec - t0.tv_nsec) / 1000LL;
     }
@@ -248,6 +257,18 @@ Java_com_bitchat_android_rtc_DACEWrapper_nativeGetLastEncodeTimeUs(
 {
     if (!handle) return 0L;
     return reinterpret_cast<DaceEncoderCtx*>(handle)->last_encode_us;
+}
+
+// ---------------------------------------------------------------------------
+// nativeGetLastSsimY(handle) -> double
+// ---------------------------------------------------------------------------
+extern "C"
+JNIEXPORT jdouble JNICALL
+Java_com_bitchat_android_rtc_DACEWrapper_nativeGetLastSsimY(
+        JNIEnv*, jclass, jlong handle)
+{
+    if (!handle) return 0.0;
+    return reinterpret_cast<DaceEncoderCtx*>(handle)->last_ssim_y;
 }
 
 // ---------------------------------------------------------------------------

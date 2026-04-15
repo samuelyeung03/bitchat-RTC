@@ -247,16 +247,26 @@ class BluetoothPacketBroadcaster(
             catch (e: Exception) { Log.e(TAG, "Fragment failed: ${e.message}"); return false }
 
             if (fragments.size > 1) {
+                // Resolve the client connection once, before launching the coroutine.
+                val clientConn = connectionTracker.getConnectedDevices().values.firstOrNull {
+                    connectionTracker.addressPeerMap[it.device.address] == targetPeerID
+                        && it.characteristic != null && it.isClient
+                }
                 connectionScope.launch {
                     if (transferId != null) TransferProgressManager.start(transferId, fragments.size)
                     var sent = 0
+                    val awaiter = clientWriteAwaiter
                     fragments.forEach { frag ->
                         if (!isActive) return@launch
                         val fragData = frag.toBinaryData() ?: return@forEach
+                        // Gate on write callback when path is client-write + awaiter is set.
+                        // This matches the same flow-control used in broadcastPacket.
+                        if (awaiter != null && clientConn != null) {
+                            try { awaiter(clientConn.device.address) } catch (_: Exception) {}
+                        }
                         sendDataToPeer(fragData, targetPeerID, gattServer, characteristic, isVideo)
-                        // 10 ms pacing for video ≥ one BLE connection interval at HIGH priority (7.5 ms).
-                        // 20 ms for everything else preserves existing behaviour.
-                        delay(if (isVideo) 10L else 20L)
+                        // Floor: still wait at least one BLE connection interval (7.5 ms HIGH priority)
+                        delay(if (isVideo) 8L else 20L)
                         if (transferId != null) {
                             sent++
                             TransferProgressManager.progress(transferId, sent, fragments.size)
@@ -460,7 +470,9 @@ class BluetoothPacketBroadcaster(
 
     /**
      * Send data to a single device (client->server).
-     * [noResponse] = true uses WRITE_TYPE_NO_RESPONSE (fire-and-forget, higher throughput for video).
+     * Uses WRITE_TYPE_DEFAULT when flow control is active (awaiter set) so
+     * onCharacteristicWrite fires and releases the per-device semaphore.
+     * Falls back to WRITE_TYPE_NO_RESPONSE only when no flow control is wired.
      */
     private fun writeToDeviceConn(
         deviceConn: BluetoothConnectionTracker.DeviceConnection,
@@ -470,12 +482,16 @@ class BluetoothPacketBroadcaster(
         return try {
             deviceConn.characteristic?.let { char ->
                 char.value = data
-                char.writeType = if (noResponse)
+                // If clientWriteAwaiter is set, we MUST use WRITE_TYPE_DEFAULT so
+                // onCharacteristicWrite fires and releases the per-device semaphore.
+                // WRITE_TYPE_NO_RESPONSE never triggers the callback → deadlock.
+                val useNoResponse = noResponse && clientWriteAwaiter == null
+                char.writeType = if (useNoResponse)
                     BluetoothGattCharacteristic.WRITE_TYPE_NO_RESPONSE
                 else
                     BluetoothGattCharacteristic.WRITE_TYPE_DEFAULT
                 val result = deviceConn.gatt?.writeCharacteristic(char) ?: false
-                Log.d(TAG, "writeToDeviceConn ${deviceConn.device.address} noResponse=$noResponse size=${data.size} result=$result")
+                Log.d(TAG, "writeToDeviceConn ${deviceConn.device.address} noResponse=$useNoResponse size=${data.size} result=$result")
                 result
             } ?: false
         } catch (e: Exception) {

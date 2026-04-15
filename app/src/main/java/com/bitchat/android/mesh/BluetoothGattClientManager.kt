@@ -83,6 +83,12 @@ class BluetoothGattClientManager(
     // Scan management
     private var scanCallback: ScanCallback? = null
 
+    // Throughput tracking (rolling window for BLE_THROUGHPUT logcat tag)
+    private var throughputWindowStart = 0L
+    private var throughputBytesSent   = 0L
+    private val THROUGHPUT_LOG_TAG    = "BLE_THROUGHPUT"
+    private val THROUGHPUT_WINDOW_MS  = 1000L
+
     /**
      * When non-null, the scan callback will ONLY attempt to connect to this address.
      * Set via ADB `connect_to` to pin the client to a single peer and stop the
@@ -452,6 +458,19 @@ class BluetoothGattClientManager(
 
                     // Release flow-control permit so next fragment can be sent.
                     connectionScope.launch { releaseWritePermit(deviceAddress) }
+
+                    // Rolling throughput measurement (1-second window)
+                    val now = System.currentTimeMillis()
+                    val bytes = characteristic?.value?.size?.toLong() ?: 0L
+                    throughputBytesSent += bytes
+                    if (throughputWindowStart == 0L) throughputWindowStart = now
+                    val elapsed = now - throughputWindowStart
+                    if (elapsed >= THROUGHPUT_WINDOW_MS) {
+                        val kbps = throughputBytesSent * 8.0 / elapsed  // bits/ms = kbps
+                        Log.i(THROUGHPUT_LOG_TAG, "THROUGHPUT device=$deviceAddress bytes_sent=$throughputBytesSent elapsed_ms=$elapsed kbps=${"%.1f".format(kbps)}")
+                        throughputBytesSent   = 0L
+                        throughputWindowStart = now
+                    }
 
                     // If this write was a ping packet, try to record RTT (best-effort)
                     try {

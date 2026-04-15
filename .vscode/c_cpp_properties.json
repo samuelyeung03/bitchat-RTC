@@ -1,0 +1,24 @@
+{
+  "configurations": [
+    {
+      "name": "Android NDK arm64",
+      "includePath": [
+        "${workspaceFolder}/app/src/main/cpp/**",
+        "${workspaceFolder}/app/src/main/cpp/x264",
+        "${workspaceFolder}/app/src/main/cpp/include",
+        "${env:HOME}/Android/Sdk/ndk/27.2.12479018/toolchains/llvm/prebuilt/linux-x86_64/sysroot/usr/include",
+        "${env:HOME}/Android/Sdk/ndk/27.2.12479018/toolchains/llvm/prebuilt/linux-x86_64/sysroot/usr/include/aarch64-linux-android"
+      ],
+      "defines": [
+        "ANDROID",
+        "__ANDROID_API__=26",
+        "__aarch64__"
+      ],
+      "compilerPath": "${env:HOME}/Android/Sdk/ndk/27.2.12479018/toolchains/llvm/prebuilt/linux-x86_64/bin/aarch64-linux-android26-clang",
+      "cStandard": "c11",
+      "cppStandard": "c++17",
+      "intelliSenseMode": "clang-arm64"
+    }
+  ],
+  "version": 4
+}

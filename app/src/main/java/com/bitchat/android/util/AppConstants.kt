@@ -146,10 +146,10 @@ object AppConstants {
         const val DEFAULT_HEIGHT: Int = 240
         const val DEFAULT_FPS: Int    = 5   // BLE mesh ~1-2 KB/s video budget; 5fps × 850B ≈ 4.25 KB/s
 
-        // Bitrate budget.  Bluetooth LE practical throughput ~200 kbps shared
-        // with audio; video gets ~100 kbps leaving headroom for overhead.
-        const val DEFAULT_BITRATE_BPS: Int = 100_000
-        const val MIN_BITRATE_BPS: Int     = 30_000
+        // Bitrate budget.  Phones (MTU=256) practical throughput ~40-80 kbps for video.
+        // 40kbps @ 3fps → ~1667B/frame → ~10 fragments → much higher delivery probability.
+        const val DEFAULT_BITRATE_BPS: Int = 40_000
+        const val MIN_BITRATE_BPS: Int     = 20_000
         const val MAX_BITRATE_BPS: Int     = 200_000
 
         // DACE complexity levels (0 = lowest CPU / fastest encode,

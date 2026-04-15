@@ -28,10 +28,11 @@ MAIN_ACTIVITY   = f"{PACKAGE}/com.bitchat.android.MainActivity"
 LOG_TAG         = "latency"
 
 # ── log patterns ──────────────────────────────────────────────────────────────
-# 04-07 19:14:42.775  5735  5880 I latency : SEND seq=93 cl=2 nal_b=708 psnr=24.31 enc_us=8123 ts_us=1234567890000
+# SEND seq=93 cl=2 nal_b=708 psnr=24.31 ssim=0.8512 enc_us=8123 ts_us=1234567890000
+# ssim field is optional (not present in older builds)
 SEND_RE = re.compile(
     r"(\d\d-\d\d \d\d:\d\d:\d\d\.\d+).*SEND seq=(\d+) cl=(-?\d+) nal_b=(\d+) "
-    r"psnr=([\d.]+) enc_us=(\d+) ts_us=(\d+)"
+    r"psnr=([\d.]+)(?:\s+ssim=([\d.]+))?\s+enc_us=(\d+) ts_us=(\d+)"
 )
 RECV_RE = re.compile(
     r"(\d\d-\d\d \d\d:\d\d:\d\d\.\d+).*RECV seq=(\d+) nal_b=(\d+) ts_us=(\d+)"
@@ -201,6 +202,7 @@ def run_pass(cl, duration, clock_delta, receiver_peer,
             "peer_id": receiver_peer,
             "cl": cl,
             "fps": int(video_extras.get("fps", 5)),
+            "bitrate": int(video_extras.get("bitrate", 40000)),
         }
         src = video_extras.get("src")
         if src:
@@ -224,8 +226,9 @@ def run_pass(cl, duration, clock_delta, receiver_peer,
                 "cl":     int(m.group(3)),
                 "nal_b":  int(m.group(4)),
                 "psnr":   float(m.group(5)),
-                "enc_us": int(m.group(6)),
-                "ts_us":  int(m.group(7)),
+                "ssim":   float(m.group(6)) if m.group(6) else None,
+                "enc_us": int(m.group(7)),
+                "ts_us":  int(m.group(8)),
             })
     for line in recv_lines:
         m = RECV_RE.search(line)
@@ -254,7 +257,7 @@ def _stat(vals):
 
 def analyse(send_rows, recv_rows, clock_delta):
     recv_by_seq = {r["seq"]: r for r in recv_rows}
-    lats, psnrs, enc_uss, nal_bs = [], [], [], []
+    lats, psnrs, ssims, enc_uss, nal_bs = [], [], [], [], []
     lost = 0
     for sr in send_rows:
         rr = recv_by_seq.get(sr["seq"])
@@ -265,6 +268,8 @@ def analyse(send_rows, recv_rows, clock_delta):
             lost += 1
         if sr["psnr"] > 0:
             psnrs.append(sr["psnr"])
+        if sr.get("ssim") is not None and sr["ssim"] > 0:
+            ssims.append(sr["ssim"])
         enc_uss.append(sr["enc_us"])
         nal_bs.append(sr["nal_b"])
     return {
@@ -272,6 +277,7 @@ def analyse(send_rows, recv_rows, clock_delta):
         "lost":    lost,
         "lat_us":  _stat(lats),
         "psnr":    _stat(psnrs),
+        "ssim":    _stat(ssims),
         "enc_us":  _stat(enc_uss),
         "nal_b":   _stat(nal_bs),
     }
@@ -282,12 +288,13 @@ def analyse(send_rows, recv_rows, clock_delta):
 def save_csv(send_rows, recv_rows, clock_delta, path):
     recv_by_seq = {r["seq"]: r for r in recv_rows}
     with open(path, "w") as f:
-        f.write("seq,cl,nal_b,psnr_db,enc_us,send_ts_us,recv_ts_us,lat_us\n")
+        f.write("seq,cl,nal_b,psnr_db,ssim,enc_us,send_ts_us,recv_ts_us,lat_us\n")
         for sr in send_rows:
             rr = recv_by_seq.get(sr["seq"])
             recv_ts = rr["ts_us"] if rr else ""
             lat     = (rr["ts_us"] - sr["ts_us"] - clock_delta) if rr else ""
-            f.write(f"{sr['seq']},{sr['cl']},{sr['nal_b']},{sr['psnr']:.3f},"
+            ssim_v  = f"{sr['ssim']:.4f}" if sr.get("ssim") is not None else ""
+            f.write(f"{sr['seq']},{sr['cl']},{sr['nal_b']},{sr['psnr']:.3f},{ssim_v},"
                     f"{sr['enc_us']},{sr['ts_us']},{recv_ts},{lat}\n")
 
 
@@ -299,8 +306,10 @@ def main():
                     help="DACE complexity levels to test (-1=auto, default: -1 0..9)")
     ap.add_argument("--duration", type=int, default=15,
                     help="seconds per run (default 15)")
-    ap.add_argument("--fps",      type=int, default=5,
-                    help="target fps for video source (default 5)")
+    ap.add_argument("--fps",      type=int, default=3,
+                    help="target fps for video source (default 3)")
+    ap.add_argument("--bitrate",  type=int, default=40000,
+                    help="encoder bitrate bps (default 40000)")
     ap.add_argument("--src",      default=None,
                     help="sender device path to planar YUV420 source file")
     ap.add_argument("--w",        type=int, default=320,
@@ -364,7 +373,7 @@ def main():
         print("TIMEOUT — aborting"); sys.exit(1)
     print("connected")
 
-    video_extras = {"fps": args.fps}
+    video_extras = {"fps": args.fps, "bitrate": args.bitrate}
     if args.src:
         video_extras.update({"src": args.src, "w": args.w, "h": args.h})
 
@@ -405,7 +414,7 @@ def main():
 
     # ── summary table ──
     HDR = (f"\n{'Mode':<8} {'n':>4} {'lost':>4}  "
-           f"{'PSNR avg':>9} {'PSNR min':>9}  "
+           f"{'PSNR avg':>9} {'PSNR min':>9}  {'SSIM avg':>9}  "
            f"{'NAL avg':>8}  "
            f"{'Enc avg':>9}  "
            f"{'Lat avg':>9} {'Lat p95':>9} {'Lat max':>9}")
@@ -416,9 +425,11 @@ def main():
         if s["n"] == 0:
             lines.append(f"{label:<8}  (no data)")
             continue
+        ssim_avg = s['ssim']['avg'] if s['ssim']['n'] > 0 else float('nan')
+        ssim_str = f"{ssim_avg:.4f}" if not (ssim_avg != ssim_avg) else "  n/a  "
         lines.append(
             f"{label:<8} {s['n']:>4} {s['lost']:>4}  "
-            f"{s['psnr']['avg']:>8.2f}dB {s['psnr']['min']:>8.2f}dB  "
+            f"{s['psnr']['avg']:>8.2f}dB {s['psnr']['min']:>8.2f}dB  {ssim_str:>9}  "
             f"{s['nal_b']['avg']:>7.0f}B  "
             f"{s['enc_us']['avg']:>8.0f}µs  "
             f"{s['lat_us']['avg']:>8.0f}µs "

@@ -68,6 +68,9 @@ class DACEEncoder(
     fun getLastPsnrY(): Double =
         if (encoderHandle != 0L) DACEWrapper.getLastPsnrY(encoderHandle) else 0.0
 
+    fun getLastSsimY(): Double =
+        if (encoderHandle != 0L) DACEWrapper.getLastSsimY(encoderHandle) else 0.0
+
     fun getLastEncodeTimeUs(): Long =
         if (encoderHandle != 0L) DACEWrapper.getLastEncodeTimeUs(encoderHandle) else 0L
 

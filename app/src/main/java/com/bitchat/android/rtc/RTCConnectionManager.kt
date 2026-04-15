@@ -370,6 +370,7 @@ class RTCConnectionManager(
         remoteView: TextureView? = null,
         complexityLevel: Int = -1,
         fps: Int = AppConstants.Dace.DEFAULT_FPS,
+        bitrate: Int = AppConstants.Dace.DEFAULT_BITRATE_BPS,
         sourcePath: String? = null,
         sourceWidth: Int? = null,
         sourceHeight: Int? = null,
@@ -403,7 +404,7 @@ class RTCConnectionManager(
             width           = width,
             height          = height,
             fps             = fps,
-            bitrate         = AppConstants.Dace.DEFAULT_BITRATE_BPS,
+            bitrate         = bitrate,
             complexityLevel = complexityLevel
         )
 
@@ -485,19 +486,26 @@ class RTCConnectionManager(
         System.arraycopy(nalBytes, 0, payload, 2, nalBytes.size)
         videoSeqNumber = (seq + 1) and 0xFFFF
 
-        // Collect PSNR + timing from DACEEncoder if available
+        // Collect PSNR + SSIM + timing from DACEEncoder if available
         val daceEnc = enc as? DACEEncoder
         val psnr    = daceEnc?.getLastPsnrY()    ?: 0.0
+        val ssim    = daceEnc?.getLastSsimY()    ?: 0.0
         val encUs   = daceEnc?.getLastEncodeTimeUs() ?: 0L
         val cl      = enc.getLastComplexity()
         val tsUs    = System.currentTimeMillis() * 1000L
-        Log.i(LATENCY_TAG, "SEND seq=$seq cl=$cl nal_b=${nalBytes.size} psnr=${"%.2f".format(psnr)} enc_us=$encUs ts_us=$tsUs")
+        Log.i(LATENCY_TAG, "SEND seq=$seq cl=$cl nal_b=${nalBytes.size} psnr=${"%.2f".format(psnr)} ssim=${"%.4f".format(ssim)} enc_us=$encUs ts_us=$tsUs")
 
-        try {
-            meshServiceRef?.sendVideo(recipientId, payload)
-                ?: Log.w(TAG, "No BluetoothMeshService attached for video — call attachMeshService() first")
-        } catch (e: Exception) {
-            Log.w(TAG, "Failed to send video frame: ${e.message}")
+        // IDR frames are large (~2-3× normal): give them extra BLE airtime by
+        // sending twice — the mesh service deduplicates by seq, so only the
+        // first delivery counts; the retry only helps if the first was lost.
+        val repeatCount = if (forceKey) 2 else 1
+        repeat(repeatCount) {
+            try {
+                meshServiceRef?.sendVideo(recipientId, payload)
+                    ?: Log.w(TAG, "No BluetoothMeshService attached for video — call attachMeshService() first")
+            } catch (e: Exception) {
+                Log.w(TAG, "Failed to send video frame: ${e.message}")
+            }
         }
     }
 

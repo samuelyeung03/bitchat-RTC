@@ -1,0 +1,36 @@
+// Device tree overlay: attach nRF54L15 DK as HCI H4 controller via serdev.
+//
+// This adds a bluetooth serdev child to the RP1 UART0 (serial@7d001000,
+// ttyAMA10 / GPIO14+15). The kernel's hci_uart serdev driver will bind
+// and create hci1 automatically, bypassing the tty layer entirely.
+// This avoids the PL011/tty EOT (0x04) byte-eating issue.
+//
+// Also disables the built-in BCM BT so there's no hci0 conflict.
+
+/dts-v1/;
+/plugin/;
+
+/ {
+	compatible = "brcm,bcm2712";
+
+	// Disable the built-in BCM BT on its dedicated UART
+	fragment@0 {
+		target-path = "/soc@107c000000/serial@7d50c000/bluetooth";
+		__overlay__ {
+			status = "disabled";
+		};
+	};
+
+	// Add nRF as H4 bluetooth controller on RP1 UART0
+	fragment@1 {
+		target-path = "/soc@107c000000/serial@7d001000";
+		__overlay__ {
+			status = "okay";
+
+			bluetooth {
+				compatible = "nrf,nrf54l15-bt";
+				max-speed = <115200>;
+			};
+		};
+	};
+};
