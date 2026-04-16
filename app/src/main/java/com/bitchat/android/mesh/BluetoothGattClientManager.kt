@@ -554,7 +554,10 @@ class BluetoothGattClientManager(
                 Log.i(TAG, "Client: MTU changed for $deviceAddress to $mtu with status $status")
 
                 if (status == BluetoothGatt.GATT_SUCCESS) {
-                    Log.i(TAG, "MTU successfully negotiated for $deviceAddress to $mtu. Requesting LE 2M PHY.")
+                    // DLE (Data Length Extension) is automatically negotiated when MTU > 23 on API 26+.
+                    // MTU=256 → LL PDU=263B (> 27B default), confirming DLE is active.
+                    val dleActive = mtu > 69
+                    Log.i(TAG, "MTU=$mtu for $deviceAddress DLE=${if (dleActive) "active" else "inactive"}. Requesting LE 2M PHY.")
                     // Request LE 2M PHY — doubles raw BLE throughput (2 Mbps vs 1 Mbps).
                     gatt.setPreferredPhy(
                         BluetoothDevice.PHY_LE_2M_MASK,

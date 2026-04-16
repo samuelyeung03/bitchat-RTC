@@ -66,6 +66,14 @@ class BluetoothPacketBroadcaster(
     fun setClientWriteAwaiter(awaiter: suspend (deviceAddress: String) -> Unit) {
         clientWriteAwaiter = awaiter
     }
+
+    // Flow control hook: called before each server notification fragment.
+    // Set to BluetoothGattServerManager::awaitNotifyPermit by BluetoothConnectionManager.
+    private var serverNotifyAwaiter: (suspend (deviceAddress: String) -> Unit)? = null
+
+    fun setServerNotifyAwaiter(awaiter: suspend (deviceAddress: String) -> Unit) {
+        serverNotifyAwaiter = awaiter
+    }
     
     /**
      * Debug logging helper - can be easily removed/disabled for production
@@ -163,17 +171,23 @@ class BluetoothPacketBroadcaster(
                 val job = connectionScope.launch {
                     var sent = 0
                     // Determine client-side targets (we are the GATT central writing to them).
-                    // We need their device address to gate flow control per-device.
                     val clientTargets = connectionTracker.getConnectedDevices().values
                         .filter { it.isClient && it.gatt != null && it.characteristic != null }
 
                     if (clientTargets.isEmpty()) {
-                        // Server-notify path: no write-callback flow control needed.
+                        // Server-notify path: gate each notification on onNotificationSent callback.
+                        val subscribedList = connectionTracker.getSubscribedDevices()
+                        val notifyAwaiter = serverNotifyAwaiter
                         fragments.forEach { fragment ->
                             if (!isActive) return@launch
                             if (transferId != null && transferJobs[transferId]?.isCancelled == true) return@launch
+                            // Await previous notification ACK per subscriber.
+                            if (notifyAwaiter != null) {
+                                subscribedList.forEach { sub ->
+                                    try { notifyAwaiter(sub.address) } catch (_: Exception) { }
+                                }
+                            }
                             broadcastSinglePacket(RoutedPacket(fragment, transferId = transferId), gattServer, characteristic)
-                            delay(20)
                             if (transferId != null) {
                                 sent += 1
                                 TransferProgressManager.progress(transferId, sent, fragments.size)
@@ -483,16 +497,16 @@ class BluetoothPacketBroadcaster(
         return try {
             deviceConn.characteristic?.let { char ->
                 char.value = data
-                // If clientWriteAwaiter is set, we MUST use WRITE_TYPE_DEFAULT so
-                // onCharacteristicWrite fires and releases the per-device semaphore.
-                // WRITE_TYPE_NO_RESPONSE never triggers the callback → deadlock.
-                val useNoResponse = noResponse && clientWriteAwaiter == null
-                char.writeType = if (useNoResponse)
+                // WNR (Write No Response) is preferred for bulk video: eliminates the ATT
+                // Write Response round-trip (~2 connection events → ~15ms) down to ~1 event (~7.5ms).
+                // onCharacteristicWrite DOES fire for WNR on Android at the stack-enqueue level,
+                // so the per-device Semaphore flow control still works correctly.
+                char.writeType = if (noResponse)
                     BluetoothGattCharacteristic.WRITE_TYPE_NO_RESPONSE
                 else
                     BluetoothGattCharacteristic.WRITE_TYPE_DEFAULT
                 val result = deviceConn.gatt?.writeCharacteristic(char) ?: false
-                Log.d(TAG, "writeToDeviceConn ${deviceConn.device.address} noResponse=$useNoResponse size=${data.size} result=$result")
+                Log.d(TAG, "writeToDeviceConn ${deviceConn.device.address} noResponse=$noResponse size=${data.size} result=$result")
                 result
             } ?: false
         } catch (e: Exception) {

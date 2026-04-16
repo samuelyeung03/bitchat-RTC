@@ -6,6 +6,7 @@ import android.bluetooth.le.AdvertiseData
 import android.bluetooth.le.AdvertiseSettings
 import android.bluetooth.le.BluetoothLeAdvertiser
 import android.content.Context
+import android.os.Build
 import android.os.ParcelUuid
 import android.util.Log
 import com.bitchat.android.protocol.BitchatPacket
@@ -13,7 +14,9 @@ import com.bitchat.android.util.AppConstants
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.sync.Semaphore
 import java.util.*
+import java.util.concurrent.ConcurrentHashMap
 
 /**
  * Manages GATT server operations, advertising, and server-side connections
@@ -30,13 +33,26 @@ class BluetoothGattServerManager(
     companion object {
         private const val TAG = "BluetoothGattServerManager"
     }
-    
+
+    // Per-device notification flow control: allows 1 in-flight notification per subscriber.
+    // Released in onNotificationSent so notifications are paced by the BLE stack callback.
+    private val notifyPermits = ConcurrentHashMap<String, Semaphore>()
+
+    /** Called by BluetoothPacketBroadcaster before each server notification fragment. */
+    suspend fun awaitNotifyPermit(deviceAddress: String) {
+        notifyPermits.getOrPut(deviceAddress) { Semaphore(1) }.acquire()
+    }
+
+    private fun releaseNotifyPermit(deviceAddress: String) {
+        notifyPermits[deviceAddress]?.release()
+    }
+
     // Core Bluetooth components
-    private val bluetoothManager: BluetoothManager = 
+    private val bluetoothManager: BluetoothManager =
         context.getSystemService(Context.BLUETOOTH_SERVICE) as BluetoothManager
     private val bluetoothAdapter: BluetoothAdapter? = bluetoothManager.adapter
     private val bleAdvertiser: BluetoothLeAdvertiser? = bluetoothAdapter?.bluetoothLeAdvertiser
-    
+
     // GATT server for peripheral mode
     private var gattServer: BluetoothGattServer? = null
     private var characteristic: BluetoothGattCharacteristic? = null
@@ -159,6 +175,9 @@ class BluetoothGattServerManager(
                     Log.d(TAG, "Server: Ignoring notification after shutdown")
                     return
                 }
+                // Release notification flow-control permit so next fragment can be sent.
+                device?.address?.let { addr -> releaseNotifyPermit(addr) }
+
                 if (status == BluetoothGatt.GATT_SUCCESS){
                     Log.d(TAG, "Notification sent successfully to ${device?.address}")
 
@@ -184,14 +203,24 @@ class BluetoothGattServerManager(
                     Log.d(TAG, "Server: Ignoring connection state change after shutdown")
                     return
                 }
-                
+
                 when (newState) {
                     BluetoothProfile.STATE_CONNECTED -> {
                         Log.i(TAG, "Server: Device connected ${device.address}")
-                        
+
+                        // Request LE 2M PHY for this connection (doubles air data rate).
+                        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                            gattServer?.setPreferredPhy(
+                                device,
+                                BluetoothDevice.PHY_LE_2M_MASK,
+                                BluetoothDevice.PHY_LE_2M_MASK,
+                                BluetoothDevice.PHY_OPTION_NO_PREFERRED
+                            )
+                        }
+
                         // Get best available RSSI (scan RSSI for server connections)
                         val rssi = connectionTracker.getBestRSSI(device.address) ?: Int.MIN_VALUE
-                        
+
                         val deviceConn = BluetoothConnectionTracker.DeviceConnection(
                             device = device,
                             rssi = rssi,
@@ -221,7 +250,7 @@ class BluetoothGattServerManager(
                     Log.d(TAG, "Server: Ignoring service added callback after shutdown")
                     return
                 }
-                
+
                 if (status == BluetoothGatt.GATT_SUCCESS) {
                     Log.d(TAG, "Server: Service added successfully: ${service.uuid}")
                 } else {
@@ -292,6 +321,17 @@ class BluetoothGattServerManager(
                 if (responseNeeded) {
                     gattServer?.sendResponse(device, requestId, BluetoothGatt.GATT_SUCCESS, 0, null)
                 }
+            }
+
+            // PHY logging (API 26+)
+            override fun onPhyUpdate(device: BluetoothDevice, txPhy: Int, rxPhy: Int, status: Int) {
+                val phyStr = { p: Int -> when (p) { 1 -> "1M"; 2 -> "2M"; 3 -> "Coded"; else -> "?$p" } }
+                Log.i(TAG, "Server: PHY updated for ${device.address} — tx=${phyStr(txPhy)} rx=${phyStr(rxPhy)} status=$status")
+            }
+
+            override fun onPhyRead(device: BluetoothDevice, txPhy: Int, rxPhy: Int, status: Int) {
+                val phyStr = { p: Int -> when (p) { 1 -> "1M"; 2 -> "2M"; 3 -> "Coded"; else -> "?$p" } }
+                Log.i(TAG, "Server: PHY read for ${device.address} — tx=${phyStr(txPhy)} rx=${phyStr(rxPhy)} status=$status")
             }
         }
         

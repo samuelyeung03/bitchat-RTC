@@ -79,6 +79,8 @@ class BluetoothConnectionManager(
     init {
         // Wire per-device write flow control after clientManager is initialized.
         packetBroadcaster.setClientWriteAwaiter { addr -> clientManager.awaitWritePermit(addr) }
+        // Wire per-device notification flow control through server manager.
+        packetBroadcaster.setServerNotifyAwaiter { addr -> serverManager.awaitNotifyPermit(addr) }
     }
 
     // Service state
@@ -280,6 +282,15 @@ class BluetoothConnectionManager(
     fun stopServer() { connectionScope.launch { serverManager.stop() } }
     fun startClient() { connectionScope.launch { clientManager.start() } }
     fun stopClient() { connectionScope.launch { clientManager.stop() } }
+
+    /** Disconnect a specific device address (client connection). Used to drop duplicate connections. */
+    fun stopClient(deviceAddress: String) {
+        connectionScope.launch { connectionTracker.disconnectDevice(deviceAddress) }
+    }
+
+    /** True if any connection (client or server) to [peerID] already exists. */
+    fun isPeerAlreadyConnected(peerID: String): Boolean =
+        connectionTracker.isPeerAlreadyConnected(peerID)
     fun stopScan()   { connectionScope.launch { clientManager.stopScanning() } }
     fun startScan()  { connectionScope.launch { clientManager.startScanning() } }
     fun pinToAddress(addr: String) { clientManager.pinToAddress(addr) }

@@ -169,6 +169,17 @@ class BluetoothConnectionTracker(
     fun isDeviceConnected(deviceAddress: String): Boolean {
         return connectedDevices.containsKey(deviceAddress)
     }
+
+    /**
+     * Returns true if we already have any connection (client or server) to the peer
+     * identified by [peerID], regardless of BLE MAC address.
+     * Prevents duplicate bidirectional connections when BLE privacy rotates MACs.
+     */
+    fun isPeerAlreadyConnected(peerID: String): Boolean {
+        return addressPeerMap.entries.any { (addr, pid) ->
+            pid == peerID && connectedDevices.containsKey(addr)
+        }
+    }
     
     /**
      * Check if connection attempt is allowed

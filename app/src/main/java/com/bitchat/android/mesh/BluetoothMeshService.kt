@@ -513,24 +513,25 @@ class BluetoothMeshService(private val context: Context) {
                     if (deviceAddress != null && pid != null) {
                         // First ANNOUNCE over a device connection defines a direct neighbor.
                         if (!connectionManager.hasSeenFirstAnnounce(deviceAddress)) {
-                            // Bind or rebind this device address to the announcing peer
-                            connectionManager.addressPeerMap[deviceAddress] = pid
-                            connectionManager.noteAnnounceReceived(deviceAddress)
-                            Log.d(
-                                TAG,
-                                "Mapped device $deviceAddress to peer $pid on FIRST-ANNOUNCE for this connection"
-                            )
+                            // Check if we already have a connection to this peer via a different address.
+                            // Both sides scanning each other creates duplicate bidirectional connections
+                            // that share BLE bandwidth — drop the newer (client) connection and keep
+                            // whichever connection already has the peer mapped.
+                            val alreadyConnected = connectionManager.isPeerAlreadyConnected(pid)
+                            if (alreadyConnected) {
+                                Log.i(TAG, "Dropping duplicate connection to peer $pid via $deviceAddress — already connected via another address")
+                                connectionManager.stopClient(deviceAddress)
+                            } else {
+                                // Bind or rebind this device address to the announcing peer
+                                connectionManager.addressPeerMap[deviceAddress] = pid
+                                connectionManager.noteAnnounceReceived(deviceAddress)
+                                Log.d(TAG, "Mapped device $deviceAddress to peer $pid on FIRST-ANNOUNCE for this connection")
 
-                            // Mark as directly connected (upgrades from routed if needed)
-                            try {
-                                peerManager.setDirectConnection(pid, true)
-                            } catch (_: Exception) {
-                            }
+                                // Mark as directly connected (upgrades from routed if needed)
+                                try { peerManager.setDirectConnection(pid, true) } catch (_: Exception) {}
 
-                            // Initial sync for this newly direct peer
-                            try {
-                                gossipSyncManager.scheduleInitialSyncToPeer(pid, 1_000)
-                            } catch (_: Exception) {
+                                // Initial sync for this newly direct peer
+                                try { gossipSyncManager.scheduleInitialSyncToPeer(pid, 1_000) } catch (_: Exception) {}
                             }
                         }
                     }
