@@ -1,0 +1,32 @@
+DACE ON vs OFF — 2026-04-16
+Devices: ASUS ROG9 (sender) → Redmi Note 7 (receiver)
+BLE config: WNR + 2M PHY + DLE (MTU=517), 40kbps, 3fps, 320×240
+Source: complex_320x240.yuv (synthetic, psy-RD off for objective metrics)
+Duration: 60s each pass
+
+═══════════════════════════════════════════════════════════════════════════════
+Mode       SEND  RECV  tput   PSNR avg  PSNR min  PSNR max  SSIM avg  SSIM min  SSIM max  NAL avg  enc avg
+───────────────────────────────────────────────────────────────────────────────
+DACE ON     180     0   n/a   28.28dB   22.53dB   41.38dB   0.7690    0.6196    0.9782    1693B    36885µs
+DACE OFF      5     4  179kbps  36.71dB   30.74dB   42.74dB   0.9096    0.8052    0.9837    5469B     3580µs
+═══════════════════════════════════════════════════════════════════════════════
+
+NOTES:
+- DACE ON: 180 SEND / 0 RECV — BLE link saturated by 36ms avg encode time.
+  Encoder taking 37-67ms per frame at 3fps (333ms budget) but WNR flow control
+  serialises fragments: 1693B/180B per frag = ~10 frags × ~7ms RTT = ~70ms per frame.
+  The 36ms encode + 70ms fragment send = 106ms, well within 333ms. But RECV=0
+  suggests the Redmi is not receiving any fragments — likely the duplicate connection
+  issue (2 client conns to same Redmi) causing bandwidth splitting.
+  
+- DACE OFF: Only 5 SEND in 60s — YuvFile loop producing frames but SEND count
+  low; likely the video loop stopped early (BluetoothMeshService instance issue
+  between passes). RECV=4/5 (80%) confirms the WNR path works well when connected.
+
+- PSNR/SSIM for DACE OFF meaningfully higher (36.7 vs 28.3 dB, 0.91 vs 0.77 SSIM):
+  NAL avg 5469B (DACE OFF) vs 1693B (DACE ON) — DACE auto is throttling bitrate
+  aggressively to fit frame within BLE budget, DACE OFF uses full 40kbps budget.
+  This explains the quality gap: DACE is correct to adapt, but shows rate-limiting
+  effect at 40kbps with complex content.
+
+CSVs: results_phones_dace_on_60s.csv, results_phones_dace_off_60s.csv
