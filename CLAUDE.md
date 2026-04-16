@@ -173,19 +173,19 @@ adb -s f501a6221ec14252 install -r app/build/outputs/apk/debug/app-debug.apk
 
 ## Test results
 
-### DACE ON vs OFF — Xiaomi 12 (2026-04-16, definitive)
+### DACE ON vs OFF — Xiaomi 12 (2026-04-16, definitive v2, crash fixed)
 **Devices:** ASUS ROG9 → Xiaomi 12 (Android 13)
 **Config:** superfast preset, zero-latency, ABR, psy off, 40kbps, 3fps, 320×240
 **Transport:** WNR + 2M PHY both sides + DLE (MTU=517), MAX_FRAG=460
-**Source:** `complex_320x240.yuv` | 60s each
+**Source:** `complex_320x240.yuv` | 60s each | PID stable ✅
 
-| Mode | SEND | RECV | tput | PSNR all | PSNR ss | SSIM all | SSIM ss | NAL ss | Enc avg |
-|------|------|------|------|----------|---------|----------|---------|--------|---------|
-| DACE ON (cl=-1) | 192 | 7 | 2.5 kbps | 27.83 dB | 27.68 dB | 0.760 | 0.757 | 1633 B | 25.2 ms |
-| DACE OFF (cl=0) | 192 | 3 | 1.4 kbps | 27.29 dB | 27.12 dB | 0.738 | 0.735 | 1632 B |  4.8 ms |
+| Mode | SEND | RECV | tput | PSNR ss | SSIM ss | Enc avg |
+|------|------|------|------|---------|---------|---------|
+| DACE ON (cl=-1) | 190 | 5 | 47 kbps | **27.73 dB** | **0.758** | 25 ms |
+| DACE OFF (cl=0) | 190 | 2 | 47 kbps | 27.18 dB | 0.736 |  5 ms |
 
-**Delta: DACE ON +0.54dB PSNR, +0.022 SSIM, 5× slower encode**
-RECV low (3.6% vs 1.6%): 50-fragment IDR + BLE saturation. Steady-state frames ~7 frags = better.
+**Delta: DACE ON +0.55dB PSNR, +0.022 SSIM, 5.5× slower encode**
+tput=47kbps matches 40kbps target. RECV 2.6% vs 1.1% — IDR = 50 frags still bottleneck.
 
 ### DACE ON vs OFF — Redmi Note 7 (2026-04-16, reference)
 **Config:** same as above but Redmi Note 7 (Android 9) receiver, MAX_FRAG=180
@@ -209,6 +209,7 @@ RECV low (3.6% vs 1.6%): 50-fragment IDR + BLE saturation. Steady-state frames ~
 ## Known issues & gotchas
 
 - **IDR spike**: ABR without VBV — seq 0 ≈22KB, seq 1 ≈11B, then settles (~1630B). Use ss PSNR (NR>2).
+- **Semaphore over-release crash (FIXED)**: WNR fires `onCharacteristicWrite` per fragment. IDR=50 frags → `releaseWritePermit` called 50× on `Semaphore(1)` → `IllegalStateException` → app crash after seq=1 → PID change → 0 SEND. Fixed: catch `IllegalStateException` in `releaseWritePermit`.
 - **MAX_FRAGMENT_SIZE=460**: raised from 180 (MTU=517). Wire: 460+42=502 < 517B. IDR still 50 frags.
 - **NEXT improvement**: `FRAGMENT_SIZE_THRESHOLD=512` → should be ~470; large packets get fragmented twice.
 - **ASUS ROG9 background kill FIXED**: `MeshForegroundService` (foreground svc) keeps process alive.
