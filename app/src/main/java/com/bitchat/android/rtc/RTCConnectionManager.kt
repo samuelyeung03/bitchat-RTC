@@ -495,17 +495,11 @@ class RTCConnectionManager(
         val tsUs    = System.currentTimeMillis() * 1000L
         Log.i(LATENCY_TAG, "SEND seq=$seq cl=$cl nal_b=${nalBytes.size} psnr=${"%.2f".format(psnr)} ssim=${"%.4f".format(ssim)} enc_us=$encUs ts_us=$tsUs")
 
-        // IDR frames are large (~2-3× normal): give them extra BLE airtime by
-        // sending twice — the mesh service deduplicates by seq, so only the
-        // first delivery counts; the retry only helps if the first was lost.
-        val repeatCount = if (forceKey) 2 else 1
-        repeat(repeatCount) {
-            try {
-                meshServiceRef?.sendVideo(recipientId, payload)
-                    ?: Log.w(TAG, "No BluetoothMeshService attached for video — call attachMeshService() first")
-            } catch (e: Exception) {
-                Log.w(TAG, "Failed to send video frame: ${e.message}")
-            }
+        try {
+            meshServiceRef?.sendVideo(recipientId, payload)
+                ?: Log.w(TAG, "No BluetoothMeshService attached for video — call attachMeshService() first")
+        } catch (e: Exception) {
+            Log.w(TAG, "Failed to send video frame: ${e.message}")
         }
     }
 
