@@ -1,0 +1,22 @@
+DACE ON vs OFF — 2026-04-16 v2 (crash fixed)
+Devices: ASUS ROG9 → Xiaomi 12 (Android 13)
+Config: superfast preset, zero-latency, ABR, psy off, 40kbps, 3fps, 320×240
+MAX_FRAGMENT_SIZE=460, WNR + 2M PHY + DLE (MTU=517)
+Duration: 60s each | PID stable both passes ✅
+
+═════════════════════════════════════════════════════════
+Mode       SEND  RECV  tput      PSNR ss   SSIM ss  enc avg
+─────────────────────────────────────────────────────────
+DACE ON     190     5  47.1kbps  27.73dB   0.7579   25.2ms
+DACE OFF    190     2  47.1kbps  27.18dB   0.7360    4.6ms
+═════════════════════════════════════════════════════════
+
+DACE ON delta: +0.55dB PSNR, +0.022 SSIM, 5.5× slower encode
+Throughput: 47.1kbps matches 40kbps target (both passes identical)
+RECV: 5/190 (2.6%) vs 2/190 (1.1%) — still limited by IDR 50 frags
+
+Root cause of previous low throughput: Semaphore over-release crash
+- WNR fires onCharacteristicWrite per fragment (50x for IDR)
+- releaseWritePermit called 50x but Semaphore(1) → IllegalStateException
+- App crashed after seq=1, restarted without mesh service → 0 SEND
+- Fix: catch IllegalStateException in releaseWritePermit

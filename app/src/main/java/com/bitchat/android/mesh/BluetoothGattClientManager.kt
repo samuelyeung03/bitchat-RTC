@@ -52,7 +52,17 @@ class BluetoothGattClientManager(
     }
 
     private suspend fun releaseWritePermit(deviceAddress: String) {
-        writePermitsLock.withLock { writePermits[deviceAddress]?.release() }
+        writePermitsLock.withLock {
+            val permit = writePermits[deviceAddress] ?: return
+            // Only release if there are waiters (availablePermits < max).
+            // Guards against over-release when WNR fires callbacks per-fragment
+            // while multiple coroutines share the same semaphore.
+            try {
+                permit.release()
+            } catch (_: IllegalStateException) {
+                // Already at full capacity — extra callback from WNR multi-fragment, ignore.
+            }
+        }
     }
 
     private suspend fun removeWritePermit(deviceAddress: String) {
