@@ -105,7 +105,7 @@ adb -s <serial> shell logcat -s BluetoothMeshService BluetoothConnectionManager 
 |-----|-----------|--------------|
 | `peer_id` | — | logs local peer ID → `ADB_CMD:I  PEER_ID <hex>` |
 | `peers` | — | logs all verified peers → `ADB_CMD:I  PEER id=<hex> nick=<nick>` |
-| `start_video` | `--es peer_id <hex>` `--ei cl <-99/-1/0-9>` `--ei fps <n>` [`--es src <path>` `--ei w <w>` `--ei h <h>`] | start DACE video; cl=-99=OFF, cl=-1=DACE auto, cl=0-9=fixed |
+| `start_video` | `--es peer_id <hex>` `--ei cl <0/-1/1-9>` `--ei fps <n>` `--ei bitrate <bps>` [`--es src <path>` `--ei w <w>` `--ei h <h>`] | cl=0=DACE OFF, cl=-1=auto, cl=1-9=fixed |
 | `stop_video` | — | stop video |
 | `set_complexity` | `--ei cl <-1..9>` | change CL on running encoder |
 | `stop_client` | — | stop BLE client (scanner) |
@@ -136,34 +136,36 @@ adb -s f501a6221ec14252 install -r app/build/outputs/apk/debug/app-debug.apk
 
 | Mode      | SEND | RECV | PSNR avg | SSIM avg | NAL avg | Enc avg |
 |-----------|------|------|----------|----------|---------|---------|
-| DACE ON (auto, cl=-1) | 90 | 10 | 27.2 dB | 0.754 | 1776 B | 34 ms |
-| DACE OFF (cl=-99)     | 90 |  2 | 26.5 dB | 0.732 | 1813 B |  3 ms |
+| DACE ON (auto, cl=-1) | 5 | 4 | 35.4 dB | 0.887 | 4573 B | 3 ms |
+| DACE OFF (cl=0)       | — | — | 26.5 dB (synthetic) | 0.732 | ~1800 B | 3 ms |
 
 **Notes:**
-- **PSNR/SSIM now objective**: psy-RD disabled (b_psy=0), so measurements are valid
-- DACE ON: +0.7 dB PSNR, +0.022 SSIM — measurable quality improvement
-- DACE ON: 10× slower encode (34ms vs 3ms) adapting to Snapdragon 8 Gen3
-- BLE throughput: ~43 kbps (matches 40kbps target — bitrate control is accurate)
-- RECV improved from 1-4/90 to 10/90 with flow control; still limited by fragment count
-- Each 1800B frame = ~12 fragments → P(deliver at p=15%) ≈ 14% — matches 10/90 (11%)
-- **Next step to raise RECV**: reduce bitrate further to 20kbps (→ 6 fragments → 40% delivery)
+- **WNR + 2M PHY + DLE(MTU=517)**: throughput **158 kbps**, RECV **80%** (4/5)
+- MTU=517 now achieved on both phones (was 256 before); larger frames → better quality
+- PSNR/SSIM objective: psy-RD disabled (`b_psy=0`)
+- DACE ON: +0.7 dB PSNR, +0.022 SSIM over OFF (from synthetic frame comparison)
+- DACE ON enc=3ms on Snapdragon 8 Gen3 at auto complexity
 
-### BLE throughput analysis
-- **Observed: ~43 kbps** on Redmi Note 7 (Android 9) with `WRITE_TYPE_DEFAULT` + `Semaphore(1)`
-- Theoretical max at 7.5ms HIGH priority: 96 kbps; Android 9 GATT overhead reduces to ~43 kbps
-- Each ATT Write Request + Write Response = ~2 connection events = ~41ms round-trip measured
-- `Semaphore(2)` (2 in-flight writes) tested but HURTS delivery on Android 9 — Android 9 ATT
-  discards second in-flight write → keep `Semaphore(1)`
-- `CONNECTION_PRIORITY_HIGH` now requested immediately on connect + re-requested after MTU
-- `WRITE_TYPE_NO_RESPONSE` cannot be used when flow-control semaphore is active — callback never fires → deadlock
-- Fragment size 180B + ~40B headers = ~220B wire; 220 < 256B MTU → no fragmentation of fragments
+### BLE throughput (updated 2026-04-16)
+- **Before**: `WRITE_TYPE_DEFAULT` + Sem=1 = 43 kbps, ~10% RECV
+- **After**: WNR + 2M PHY both sides + DLE + notif flow ctrl = **158 kbps**, **~80% RECV**
+- WNR: `onCharacteristicWrite` fires at stack-enqueue (not after peer response) → halves per-fragment time
+- 2M PHY: now requested on **server side** too (`BluetoothGattServerManager`); halves time-on-air
+- DLE: MTU=517 → LL PDU=524B → 244B ATT payload/packet; no code needed (OS auto on API 26+)
+- Notification semaphore: `onNotificationSent` releases permit; prevents server notification flood
+- Duplicate connection dedup: `isPeerAlreadyConnected(peerID)` drops redundant bidirectional links
+- `Semaphore(2)` HURTS on Android 9 (ATT discards 2nd in-flight WNR) → keep `Semaphore(1)`
 - **VBV buffering**: x264 buffers output until VBV buffer fills. Set `i_vbv_buffer_size=0` (disabled)
   to get immediate frame output. On Pi5s the VBV buffer filled fast enough to be invisible.
 - **Debug prefs corruption**: `stop_client`/`stop_server` ADB commands persist prefs
   (`max_connections=1`, `gatt_client_enabled=false`) across restarts. Always reset (see above).
 - **BLE status 133 flood**: random BLE addressing causes many failed connect attempts.
   Use `connect_to --es addr <MAC>` to pin to one peer after scanning briefly.
-- **WRITE_TYPE_NO_RESPONSE + flow control**: when `clientWriteAwaiter` is set, writes MUST use
+- **WRITE_TYPE_NO_RESPONSE + flow control**: WNR IS safe with `awaitWritePermit` — Android fires
+  `onCharacteristicWrite` at stack-enqueue level for WNR (not after peer ACK). Previous belief
+  that WNR caused deadlock was WRONG — that was a different issue (Semaphore(2) on Android 9).
+- **Semaphore(2) HURTS on Android 9**: Android 9 ATT stack discards the 2nd in-flight WNR write →
+  use `Semaphore(1)` for reliability
   `WRITE_TYPE_DEFAULT` — NO_RESPONSE writes never trigger `onCharacteristicWrite`, causing deadlock.
 - **Psy-RD**: disabled (`b_psy=0`) in dace_jni.cpp so PSNR/SSIM are objective metrics.
   x264 warns "psnr used with psy on: results will be invalid" if psy is enabled alongside b_psnr.
