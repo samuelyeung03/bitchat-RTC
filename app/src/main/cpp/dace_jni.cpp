@@ -38,9 +38,11 @@ Java_com_bitchat_android_rtc_DACEWrapper_nativeCreateEncoder(
         jint width, jint height, jint fps, jint bitrate, jint complexityLevel)
 {
     auto* ctx = new DaceEncoderCtx();
-    x264_param_default(&ctx->param);
-
-    // Baseline profile – most compatible, low latency
+    // superfast preset + ssim tune — matches libtest/test_x264.cpp reference config.
+    // superfast gives fast encoding with decent quality; ssim tune optimises perceptual quality.
+    if (x264_param_default_preset(&ctx->param, "superfast", "ssim") < 0) {
+        x264_param_default(&ctx->param);  // fallback if preset unavailable
+    }
     x264_param_apply_profile(&ctx->param, "baseline");
 
     ctx->param.i_width    = width;
@@ -48,39 +50,32 @@ Java_com_bitchat_android_rtc_DACEWrapper_nativeCreateEncoder(
     ctx->param.i_fps_num  = (uint32_t)fps;
     ctx->param.i_fps_den  = 1;
 
-    // Rate control
-    ctx->param.rc.i_rc_method      = X264_RC_ABR;
-    ctx->param.rc.i_bitrate        = bitrate / 1000;   // x264 expects kbps
-    ctx->param.rc.i_vbv_max_bitrate = 0;   // no VBV cap — instant output (VBV causes multi-second buffering at low fps)
-    ctx->param.rc.i_vbv_buffer_size = 0;   // disable VBV delay
+    // Rate control: ABR, peak cap = bitrate, no VBV buffer delay (real-time).
+    // Matches reference: i_vbv_max_bitrate=br, i_vbv_buffer_size=0
+    ctx->param.rc.i_rc_method       = X264_RC_ABR;
+    ctx->param.rc.i_bitrate         = bitrate / 1000;    // x264 expects kbps
+    ctx->param.rc.i_vbv_max_bitrate = bitrate / 1000;    // cap peak at target
+    ctx->param.rc.i_vbv_buffer_size = 0;                 // no VBV delay
+    ctx->param.rc.i_aq_mode         = 1;                 // adaptive quantisation
 
-    // Low-latency encoding: no B-frames, no lookahead
-    ctx->param.i_bframe             = 0;
-    ctx->param.b_sliced_threads     = 0;
-    ctx->param.i_sync_lookahead     = 0;
-    ctx->param.rc.b_mb_tree         = 0;
-    ctx->param.i_lookahead_threads  = 0;
-    ctx->param.b_vfr_input          = 0;
-    ctx->param.b_repeat_headers     = 1;  // SPS/PPS in every IDR
-    ctx->param.b_annexb             = 1;
+    // Zero-latency flags (matches reference config)
+    ctx->param.rc.i_lookahead   = 0;
+    ctx->param.i_sync_lookahead = 0;
+    ctx->param.i_bframe         = 0;
+    ctx->param.b_sliced_threads = 1;
+    ctx->param.b_vfr_input      = 0;
+    ctx->param.rc.b_mb_tree     = 0;
+    ctx->param.b_repeat_headers = 1;  // SPS/PPS in every IDR
+    ctx->param.b_annexb         = 1;
+    ctx->param.i_lookahead_threads = 0;
 
     // DACE: enable or disable adaptive complexity encoding.
-    // complexityLevel == 0   → DACE OFF (param.dace=0, plain x264 at CL0 analysis settings)
-    // complexityLevel == -1  → DACE ON, auto (self-regulates based on frame timing)
-    // complexityLevel >= 1   → DACE ON, fixed level (for benchmarking CL1..CL9)
+    // complexityLevel == 0   → DACE OFF (param.dace=0, superfast preset settings)
+    // complexityLevel == -1  → DACE ON, auto
+    // complexityLevel >= 1   → DACE ON, fixed level
     ctx->param.i_threads = 1;
     if (complexityLevel == 0) {
-        // DACE OFF: plain x264 with fast/low-complexity preset matching CL0 effort
-        ctx->param.dace                       = 0;
-        ctx->param.analyse.i_trellis          = 0;
-        ctx->param.analyse.inter              = X264_ANALYSE_I4x4 | X264_ANALYSE_I8x8;
-        ctx->param.analyse.i_me_method        = X264_ME_DIA;
-        ctx->param.analyse.i_subpel_refine    = 1;
-        ctx->param.analyse.b_mixed_references = 0;
-        ctx->param.analyse.b_chroma_me        = 0;
-        ctx->param.analyse.i_me_range         = 16;
-        ctx->param.analyse.b_fast_pskip       = 1;
-        ctx->param.b_deblocking_filter        = 0;
+        ctx->param.dace = 0;  // DACE OFF: plain x264 with superfast preset analysis
     } else {
         ctx->param.dace                  = 1;
         ctx->param.dace_complexity_level = complexityLevel; // -1=auto, 1-9=fixed

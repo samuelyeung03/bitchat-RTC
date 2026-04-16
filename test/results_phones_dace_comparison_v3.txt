@@ -1,0 +1,23 @@
+DACE ON vs OFF — 2026-04-16 v3
+Devices: ASUS ROG9 (sender) → Redmi Note 7 (receiver)
+Config: superfast preset, ssim tune, zero-latency flags, ABR no VBV
+BLE: WNR + 2M PHY + DLE (MTU=517), 40kbps, 3fps, 320×240
+Source: complex_320x240.yuv, psy-RD off (b_psy=0)
+Duration: 60s each
+
+═══════════════════════════════════════════════════════════════════════════
+Mode     SEND RECV  tput    PSNR avg  PSNR ss  SSIM avg  SSIM ss  NAL avg  enc avg
+─────────────────────────────────────────────────────────────────────────────
+DACE ON    51   10  72kbps  29.88dB   29.35dB  0.8167   0.8098   1911B    13544µs
+DACE OFF   81   11  68kbps  26.97dB   26.57dB  0.7409   0.7348   1826B     4793µs
+═══════════════════════════════════════════════════════════════════════════
+
+DACE ON vs DACE OFF delta:
+  PSNR: +2.91 dB (all), +2.78 dB (steady-state)
+  SSIM: +0.076 (all),  +0.075 (steady-state)
+  Enc:  13.5ms vs 4.8ms (DACE ON ~3× slower, adapting complexity)
+  NAL:  1911B vs 1826B (DACE ON produces slightly larger frames)
+  Throughput: 72 vs 68 kbps (both within 40kbps ABR target window)
+
+IDR spike still present (seq 0: ~22KB, seq 1: ~11B) — inherent to ABR without
+VBV. Steady-state PSNR (skip first 2 frames) is the fair comparison metric.
