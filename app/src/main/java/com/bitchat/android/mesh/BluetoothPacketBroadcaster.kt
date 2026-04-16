@@ -265,8 +265,9 @@ class BluetoothPacketBroadcaster(
                             try { awaiter(clientConn.device.address) } catch (_: Exception) {}
                         }
                         sendDataToPeer(fragData, targetPeerID, gattServer, characteristic, isVideo)
-                        // Floor: still wait at least one BLE connection interval (7.5 ms HIGH priority)
-                        delay(if (isVideo) 8L else 20L)
+                        // For video: awaitWritePermit already paces via write callback — no extra delay.
+                        // For non-video: keep 20ms delay to preserve existing behaviour.
+                        if (!isVideo) delay(20L)
                         if (transferId != null) {
                             sent++
                             TransferProgressManager.progress(transferId, sent, fragments.size)

@@ -46,7 +46,7 @@ class BluetoothGattClientManager(
      *  previous write's onCharacteristicWrite callback has fired. */
     suspend fun awaitWritePermit(deviceAddress: String) {
         val permit = writePermitsLock.withLock {
-            writePermits.getOrPut(deviceAddress) { Semaphore(1) }
+            writePermits.getOrPut(deviceAddress) { Semaphore(1) }  // 1 in-flight write for reliability
         }
         permit.acquire()
     }
@@ -511,11 +511,15 @@ class BluetoothGattClientManager(
                 Log.d(TAG, "Client: Connection state change - Device: $deviceAddress, Status: $status, NewState: $newState")
 
                 if (newState == BluetoothProfile.STATE_CONNECTED && status == BluetoothGatt.GATT_SUCCESS) {
-                    Log.i(TAG, "Client: Successfully connected to $deviceAddress. Requesting MTU...")
-                    // Request a larger MTU. Must be done before any data transfer.
+                    Log.i(TAG, "Client: Successfully connected to $deviceAddress. Requesting MTU + HIGH priority...")
+                    // Request HIGH connection priority immediately on connect — reduces interval
+                    // from ~45ms (default) to 7.5ms before any data exchange begins.
+                    gatt.requestConnectionPriority(BluetoothGatt.CONNECTION_PRIORITY_HIGH)
                     connectionScope.launch {
                         delay(200) // A small delay can improve reliability of MTU request.
                         gatt.requestMtu(517)
+                        // Re-request HIGH after MTU negotiation; MTU exchange can reset priority.
+                        delay(500)
                         gatt.requestConnectionPriority(BluetoothGatt.CONNECTION_PRIORITY_HIGH)
                     }
                 } else if (newState == BluetoothProfile.STATE_DISCONNECTED) {

@@ -38,7 +38,11 @@ class DACEEncoder(
         if (encoderHandle == 0L) {
             Log.e(TAG, "Failed to create DACE encoder ($width x $height @ $fps fps, $bitrate bps)")
         } else {
-            val clDesc = if (complexityLevel < 0) "auto" else "fixed=$complexityLevel"
+            val clDesc = when {
+                complexityLevel == 0  -> "off"   // DACE OFF: param.dace=0
+                complexityLevel == -1 -> "auto"  // DACE ON, auto
+                else                  -> "fixed=$complexityLevel"
+            }
             Log.i(TAG, "DACE encoder ready: ${width}x${height} @${fps}fps ${bitrate}bps cl=$clDesc")
         }
     }

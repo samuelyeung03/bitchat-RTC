@@ -65,11 +65,11 @@ Java_com_bitchat_android_rtc_DACEWrapper_nativeCreateEncoder(
     ctx->param.b_annexb             = 1;
 
     // DACE: enable or disable adaptive complexity encoding.
-    // complexityLevel == -99 → DACE OFF (param.dace=0, plain x264 at CL0 analysis settings)
+    // complexityLevel == 0   → DACE OFF (param.dace=0, plain x264 at CL0 analysis settings)
     // complexityLevel == -1  → DACE ON, auto (self-regulates based on frame timing)
-    // complexityLevel >= 0   → DACE ON, fixed level (for benchmarking CL0..CL9)
+    // complexityLevel >= 1   → DACE ON, fixed level (for benchmarking CL1..CL9)
     ctx->param.i_threads = 1;
-    if (complexityLevel == -99) {
+    if (complexityLevel == 0) {
         // DACE OFF: plain x264 with fast/low-complexity preset matching CL0 effort
         ctx->param.dace                       = 0;
         ctx->param.analyse.i_trellis          = 0;
@@ -83,7 +83,7 @@ Java_com_bitchat_android_rtc_DACEWrapper_nativeCreateEncoder(
         ctx->param.b_deblocking_filter        = 0;
     } else {
         ctx->param.dace                  = 1;
-        ctx->param.dace_complexity_level = complexityLevel; // -1=auto, 0-9=fixed
+        ctx->param.dace_complexity_level = complexityLevel; // -1=auto, 1-9=fixed
     }
     ctx->param.analyse.b_psnr = 1; // enable x264 luma PSNR in picOut.prop
     ctx->param.analyse.b_ssim = 1; // enable x264 luma SSIM in picOut.prop
@@ -107,8 +107,8 @@ Java_com_bitchat_android_rtc_DACEWrapper_nativeCreateEncoder(
         return 0L;
     }
 
-    const char* mode = (complexityLevel == -99) ? "off" :
-                       (complexityLevel ==  -1) ? "auto" : "fixed";
+    const char* mode = (complexityLevel == 0) ? "off" :
+                       (complexityLevel == -1) ? "auto" : "fixed";
     LOGI("DACE encoder created: %dx%d @%dfps %dbps dace=%s cl=%d",
          width, height, fps, bitrate, mode, complexityLevel);
     return reinterpret_cast<jlong>(ctx);
