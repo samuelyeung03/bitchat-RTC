@@ -90,7 +90,7 @@ SSIM available: `daceEnc.getLastSsimY()` — logged as `ssim=X.XXXX` in SEND log
 - **Observed: ~70 kbps** (phones, WNR + 2M PHY + DLE)
 - **WNR** (`WRITE_TYPE_NO_RESPONSE`): always used for video — `onCharacteristicWrite` fires at stack-enqueue level for WNR, semaphore still works
 - **2M PHY**: requested both client-side (in `onMtuChanged`) AND server-side (in `onConnectionStateChange`)
-- **DLE**: MTU=517 auto-negotiated; `MAX_FRAGMENT_SIZE=180` is now conservative — could increase to ~460 for better efficiency on phones (currently 180 was set for old 256B MTU era)
+- **DLE**: MTU=517 auto-negotiated; `MAX_FRAGMENT_SIZE=460` (raised from 180, fits MTU=517)
 - **Notification semaphore**: `onNotificationSent` releases permit for server-notify path
 - **Duplicate connection dedup**: `isPeerAlreadyConnected(peerID)` in `BluetoothMeshService` drops redundant bidirectional connections that split bandwidth
 - **Semaphore(2) HURTS**: Android 9 ATT discards 2nd in-flight WNR → keep `Semaphore(1)`
@@ -173,39 +173,49 @@ adb -s f501a6221ec14252 install -r app/build/outputs/apk/debug/app-debug.apk
 
 ## Test results
 
-### DACE ON vs OFF — phones (2026-04-16, definitive)
-**Config:** superfast preset + ssim tune, zero-latency, ABR, psy off, 40kbps, 3fps, 320×240
-**Transport:** WNR + 2M PHY both sides + DLE (MTU=517)
-**Source:** `complex_320x240.yuv`
+### DACE ON vs OFF — Xiaomi 12 (2026-04-16, definitive)
+**Devices:** ASUS ROG9 → Xiaomi 12 (Android 13)
+**Config:** superfast preset, zero-latency, ABR, psy off, 40kbps, 3fps, 320×240
+**Transport:** WNR + 2M PHY both sides + DLE (MTU=517), MAX_FRAG=460
+**Source:** `complex_320x240.yuv` | 60s each
 
-| Mode | SEND | RECV | tput | PSNR avg | PSNR ss | SSIM avg | SSIM ss | NAL avg | Enc avg |
-|------|------|------|------|----------|---------|----------|---------|---------|---------|
-| DACE ON (cl=-1) | 51 | 10 | 72 kbps | 29.88 dB | 29.35 dB | 0.817 | 0.810 | 1911 B | 13.5 ms |
-| DACE OFF (cl=0) | 81 | 11 | 68 kbps | 26.97 dB | 26.57 dB | 0.741 | 0.735 | 1826 B |  4.8 ms |
+| Mode | SEND | RECV | tput | PSNR all | PSNR ss | SSIM all | SSIM ss | NAL ss | Enc avg |
+|------|------|------|------|----------|---------|----------|---------|--------|---------|
+| DACE ON (cl=-1) | 192 | 7 | 2.5 kbps | 27.83 dB | 27.68 dB | 0.760 | 0.757 | 1633 B | 25.2 ms |
+| DACE OFF (cl=0) | 192 | 3 | 1.4 kbps | 27.29 dB | 27.12 dB | 0.738 | 0.735 | 1632 B |  4.8 ms |
 
-**Delta: DACE ON +2.9 dB PSNR, +0.076 SSIM, 3× slower encode**
-ss = steady-state (skip first 2 frames — IDR spike artificially lowers first-frame PSNR)
+**Delta: DACE ON +0.54dB PSNR, +0.022 SSIM, 5× slower encode**
+RECV low (3.6% vs 1.6%): 50-fragment IDR + BLE saturation. Steady-state frames ~7 frags = better.
+
+### DACE ON vs OFF — Redmi Note 7 (2026-04-16, reference)
+**Config:** same as above but Redmi Note 7 (Android 9) receiver, MAX_FRAG=180
+
+| Mode | SEND | RECV | PSNR ss | SSIM ss | Enc avg |
+|------|------|------|---------|---------|---------|
+| DACE ON | 51 | 10 | 29.35 dB | 0.810 | 13.5 ms |
+| DACE OFF | 81 | 11 | 26.57 dB | 0.735 |  4.8 ms |
+
+**Delta: DACE ON +2.78dB PSNR, +0.075 SSIM** (with MAX_FRAG=180 = fewer frags per frame)
 
 ### DACE ON vs OFF — Pi5s (2026-04-08, encode-side only)
 **Config:** 100kbps, 5fps, 320×240
-| Mode | PSNR avg | Enc avg | NAL avg |
-|------|----------|---------|---------|
-| auto   | 42.7 dB | 46 ms | 2567 B |
-| CL0    | 43.4 dB |  6 ms | 2496 B |
-| CL1-5  | 43-44 dB | 5-18 ms | 2400-2520 B |
+| Mode | PSNR avg | Enc avg |
+|------|----------|---------|
+| auto   | 42.7 dB | 46 ms |
+| CL0    | 43.4 dB |  6 ms |
 
 ---
 
 ## Known issues & gotchas
 
-- **IDR spike**: ABR without VBV — seq 0 ≈22KB, seq 1 ≈11B, then settles. Use steady-state PSNR (NR>2) for fair comparison.
-- **MAX_FRAGMENT_SIZE=460**: raised from 180 (MTU=517 confirmed on both phones). Wire: 460+42=502 < 517B. Reduces fragment count ~11→5 per frame at 40kbps.
-- **NEXT improvement**: increase `FRAGMENT_SIZE_THRESHOLD` from 512 too (currently packets > 512B get fragmented; with MTU=517, no-fragmentation threshold should be ~470B)
-- **ASUS ROG9 background kill**: ASUS ROG Phone 9 (Android 14) aggressively kills BLE connections when app goes to background. Every `am start AdbActivity` sends the app to BG briefly → BLE drops. Workaround: push `KEYCODE_WAKEUP` before each ADB command and call `am start MainActivity` first. **Better fix needed**: add a foreground service notification to prevent OS from killing the mesh service.
-- **Xiaomi 12 Bluetooth permissions**: `svc bluetooth disable/enable` revokes runtime permissions. Re-grant after each toggle: `pm grant com.bitchat.droid android.permission.BLUETOOTH_ADVERTISE` etc.
-- **IDR double-send REMOVED**: the `repeat(2)` for IDR frames caused deadlock — two coroutines competing for `awaitWritePermit` on the same device after launching 50-fragment IDR payload.
-- **Fragment count at 460B**: 22865B IDR / 460B = 50 frags. Post-IDR 11B frame. Then frames settle to ~2900B = 7 frags each. Delivery at 7 frags much better than 11.
-- **RECV variability**: 0-20% across runs — BLE radio + Android 9 ATT stack is the bottleneck.
+- **IDR spike**: ABR without VBV — seq 0 ≈22KB, seq 1 ≈11B, then settles (~1630B). Use ss PSNR (NR>2).
+- **MAX_FRAGMENT_SIZE=460**: raised from 180 (MTU=517). Wire: 460+42=502 < 517B. IDR still 50 frags.
+- **NEXT improvement**: `FRAGMENT_SIZE_THRESHOLD=512` → should be ~470; large packets get fragmented twice.
+- **ASUS ROG9 background kill FIXED**: `MeshForegroundService` (foreground svc) keeps process alive.
+  `AdbBroadcastReceiver` registered dynamically — use `am broadcast -a com.bitchat.droid.CMD` not `am start AdbActivity`.
+  Pattern: `am start MainActivity` → 0.5s → `am broadcast CMD` to ensure mesh service is running.
+- **Xiaomi 12 Bluetooth permissions**: `svc bluetooth disable/enable` revokes runtime permissions. Re-grant after each toggle.
+- **IDR double-send REMOVED**: caused deadlock (two coroutines competing for `awaitWritePermit`).
 - **ADB BluetoothMeshService not running**: app may restart between test passes. Always call `am start MainActivity` before each AdbActivity call in scripts, not just once.
 - **ADB_CMD logcat delay**: phones need 4-5s after `am start AdbActivity` before log appears.
 - **Duplicate BLE connections**: two devices each scanning each other creates 2 connections sharing bandwidth. `isPeerAlreadyConnected()` dedup runs at first-ANNOUNCE time — not instantaneous. Check `Periodic cleanup: N connections` — ideally N=1 per peer.
@@ -218,7 +228,10 @@ ss = steady-state (skip first 2 frames — IDR spike artificially lowers first-f
 - Commit after each meaningful change
 - cl=0 = DACE OFF; cl=-1 = DACE auto ON; cl=1-9 = DACE fixed ON
 - Reference x264 config is in `~/libtest/test_x264.cpp` — match it
-- `PSNR/SSIM` are objective (psy off). IDR spike skews "all-frames" avg — use steady-state
+- `PSNR/SSIM` are objective (psy off). IDR spike skews "all-frames" avg — use steady-state (ss)
 - Use `--src /data/local/tmp/complex_320x240.yuv` for reproducible results
 - After stop_client/stop_server, ALWAYS reset debug prefs
-- ble_psnr_test.py: `--sender T1AIOC656909KGK --receiver dc1c0ad --bitrate 40000 --fps 3`
+- **Use `am broadcast -a com.bitchat.droid.CMD` not `am start AdbActivity`** — broadcast stays in same process
+- Before each broadcast: `am start MainActivity` + 0.5s sleep to ensure mesh service is running
+- Screen wake before every ADB command: `input keyevent KEYCODE_WAKEUP`
+- Xiaomi 12 (8e27af28) peer ID: `fea25dd05ccc26a6`
