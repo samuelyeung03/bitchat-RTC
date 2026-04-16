@@ -1,0 +1,22 @@
+DACE ON vs OFF — 2026-04-16 (Xiaomi 12, definitive)
+Devices: ASUS ROG9 (sender) → Xiaomi 12 (receiver, Android 13)
+Config: superfast preset, zero-latency, ABR, psy off, 40kbps, 3fps, 320×240
+Frag: MAX_FRAGMENT_SIZE=460, WNR + 2M PHY + DLE (MTU=517)
+Source: complex_320x240.yuv | Duration: 60s each
+
+══════════════════════════════════════════════════════════════════════════
+Mode       SEND  RECV  tput    PSNR all  PSNR ss  SSIM all  SSIM ss  enc avg
+────────────────────────────────────────────────────────────────────────────
+DACE ON     192     7  2.5kbps  27.83dB  27.68dB   0.7595   0.7571   25.2ms
+DACE OFF    192     3  1.4kbps  27.29dB  27.12dB   0.7379   0.7353    4.8ms
+══════════════════════════════════════════════════════════════════════════
+
+DACE ON delta: +0.54dB PSNR, +0.022 SSIM, 5× slower encode
+RECV: 7/192 (3.6%) vs 3/192 (1.6%) — DACE ON slightly better delivery
+tput: 2.5kbps vs 1.4kbps (both < 40kbps target — fragments still saturating BLE)
+
+IDR spike: seq0=22865B (IDR), seq1=11B (correction), then steady ~1630B.
+Steady-state PSNR (ss, skip first 2 frames) is the fair metric.
+
+Note: Xiaomi 12 (Android 13) + ASUS ROG9 (Android 14) both have aggressive
+background kill. Workaround: am start MainActivity before each command.

@@ -1,7 +1,9 @@
 package com.bitchat.android.mesh
 
 import android.content.Context
+import android.content.IntentFilter
 import android.util.Log
+import com.bitchat.android.AdbBroadcastReceiver
 import com.bitchat.android.crypto.EncryptionService
 import com.bitchat.android.model.BitchatMessage
 import com.bitchat.android.model.RoutedPacket
@@ -65,6 +67,7 @@ class BluetoothMeshService(private val context: Context) {
 
     // Service state management
     private var isActive = false
+    private val adbReceiver = AdbBroadcastReceiver()  // dynamically registered so commands reach existing process
 
     // Delegate for message callbacks (maintains same interface)
     var delegate: BluetoothMeshDelegate? = null
@@ -723,6 +726,14 @@ class BluetoothMeshService(private val context: Context) {
 
         if (connectionManager.startServices()) {
             isActive = true
+            // Dynamic broadcast receiver: receives `am broadcast -a com.bitchat.droid.CMD`
+            // in the existing process — no new process spawned unlike `am start AdbActivity`.
+            try {
+                val filter = IntentFilter(AdbBroadcastReceiver.ACTION)
+                context.registerReceiver(adbReceiver, filter, Context.RECEIVER_EXPORTED)
+            } catch (_: Exception) {}
+            // Start foreground service to prevent OS from killing BLE when app is backgrounded
+            try { MeshForegroundService.start(context) } catch (_: Exception) {}
 
             // Start periodic announcements for peer discovery and connectivity
             sendPeriodicBroadcastAnnounce()
@@ -760,6 +771,8 @@ class BluetoothMeshService(private val context: Context) {
         Log.i(TAG, "Stopping Bluetooth mesh service")
         isActive = false
         instance = null
+        try { context.unregisterReceiver(adbReceiver) } catch (_: Exception) {}
+        try { MeshForegroundService.stop(context) } catch (_: Exception) {}
 
         // Send leave announcement
         sendLeaveAnnouncement()

@@ -37,6 +37,9 @@
     
     <!-- Battery optimization permission -->
     <uses-permission android:name="android.permission.REQUEST_IGNORE_BATTERY_OPTIMIZATIONS" />
+    <!-- Foreground service — keeps BLE mesh alive when app is backgrounded -->
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_CONNECTED_DEVICE" />
     
     <!-- Hardware features -->
     <uses-feature android:name="android.hardware.bluetooth_le" android:required="true" />
@@ -80,10 +83,16 @@
                 <category android:name="android.intent.category.LAUNCHER" />
             </intent-filter>
         </activity>
-        <!-- Zero-UI Activity for ADB control via am start -->
+        <!-- Zero-UI Activity for ADB control via am start (kept for compatibility) -->
         <activity
             android:name=".AdbActivity"
             android:exported="true"
-            android:theme="@android:style/Theme.NoDisplay" />
+            android:theme="@android:style/Theme.NoDisplay"
+            android:excludeFromRecents="true" />
+        <!-- Foreground service: keeps BLE mesh alive when app is backgrounded -->
+        <service
+            android:name=".mesh.MeshForegroundService"
+            android:foregroundServiceType="connectedDevice"
+            android:exported="false" />
     </application>
 </manifest>
