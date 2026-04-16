@@ -20,8 +20,8 @@ voice, and video over fragmented GATT packets.
 |------|-----------|--------|-------|
 | Pi 5 #1 (sender) | `798f51f064cce0d1` | RPi5/AOSP | Razer Kiyo X on `/dev/video0` |
 | Pi 5 #2 (receiver) | `f501a6221ec14252` | RPi5/AOSP | no camera |
-| Phone sender | `T1AIOC656909KGK` | ASUS ROG Phone 9 (AI2501C, Snapdragon 8 Gen3) | YUV file or camera |
-| Phone receiver | `dc1c0ad` | Redmi Note 7 (lavender, Android 9) | MTU=517 after fix |
+| Phone 1 | `T1AIOC656909KGK` | ASUS ROG Phone 9 (AI2501C, Snapdragon 8 Gen3, Android 14) | YUV file `/data/local/tmp/complex_320x240.yuv` |
+| Phone 2 (new) | `8e27af28` | Xiaomi 12 (cupid, Snapdragon 8 Gen1, Android 13) | Replaced Redmi Note 7; peer ID `fea25dd05ccc26a6` |
 
 Both Pis run AOSP 16 (eng.samuel). Phones run stock Android.
 YUV test file on ASUS: `/data/local/tmp/complex_320x240.yuv` (push from `test/media/`).
@@ -199,7 +199,12 @@ ss = steady-state (skip first 2 frames — IDR spike artificially lowers first-f
 ## Known issues & gotchas
 
 - **IDR spike**: ABR without VBV — seq 0 ≈22KB, seq 1 ≈11B, then settles. Use steady-state PSNR (NR>2) for fair comparison.
-- **MAX_FRAGMENT_SIZE=180**: conservative for old 256B MTU era. MTU is now 517 on phones — could raise to ~460 for 2× delivery improvement (would halve fragment count from ~11 to ~5).
+- **MAX_FRAGMENT_SIZE=460**: raised from 180 (MTU=517 confirmed on both phones). Wire: 460+42=502 < 517B. Reduces fragment count ~11→5 per frame at 40kbps.
+- **NEXT improvement**: increase `FRAGMENT_SIZE_THRESHOLD` from 512 too (currently packets > 512B get fragmented; with MTU=517, no-fragmentation threshold should be ~470B)
+- **ASUS ROG9 background kill**: ASUS ROG Phone 9 (Android 14) aggressively kills BLE connections when app goes to background. Every `am start AdbActivity` sends the app to BG briefly → BLE drops. Workaround: push `KEYCODE_WAKEUP` before each ADB command and call `am start MainActivity` first. **Better fix needed**: add a foreground service notification to prevent OS from killing the mesh service.
+- **Xiaomi 12 Bluetooth permissions**: `svc bluetooth disable/enable` revokes runtime permissions. Re-grant after each toggle: `pm grant com.bitchat.droid android.permission.BLUETOOTH_ADVERTISE` etc.
+- **IDR double-send REMOVED**: the `repeat(2)` for IDR frames caused deadlock — two coroutines competing for `awaitWritePermit` on the same device after launching 50-fragment IDR payload.
+- **Fragment count at 460B**: 22865B IDR / 460B = 50 frags. Post-IDR 11B frame. Then frames settle to ~2900B = 7 frags each. Delivery at 7 frags much better than 11.
 - **RECV variability**: 0-20% across runs — BLE radio + Android 9 ATT stack is the bottleneck.
 - **ADB BluetoothMeshService not running**: app may restart between test passes. Always call `am start MainActivity` before each AdbActivity call in scripts, not just once.
 - **ADB_CMD logcat delay**: phones need 4-5s after `am start AdbActivity` before log appears.
