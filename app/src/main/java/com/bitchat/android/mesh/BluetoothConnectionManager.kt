@@ -288,6 +288,11 @@ class BluetoothConnectionManager(
         connectionScope.launch { connectionTracker.disconnectDevice(deviceAddress) }
     }
 
+    /** Block [deviceAddress] from reconnecting for 30s — used after dropping a duplicate. */
+    fun blockAddressAsDuplicate(deviceAddress: String) {
+        clientManager.blockAddressAsDuplicate(deviceAddress)
+    }
+
     /** True if any connection (client or server) to [peerID] already exists. */
     fun isPeerAlreadyConnected(peerID: String): Boolean =
         connectionTracker.isPeerAlreadyConnected(peerID)

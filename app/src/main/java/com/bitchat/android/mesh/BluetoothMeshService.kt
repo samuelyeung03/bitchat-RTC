@@ -524,6 +524,7 @@ class BluetoothMeshService(private val context: Context) {
                             if (alreadyConnected) {
                                 Log.i(TAG, "Dropping duplicate connection to peer $pid via $deviceAddress — already connected via another address")
                                 connectionManager.stopClient(deviceAddress)
+                                connectionManager.blockAddressAsDuplicate(deviceAddress)   // stop storm
                             } else {
                                 // Bind or rebind this device address to the announcing peer
                                 connectionManager.addressPeerMap[deviceAddress] = pid

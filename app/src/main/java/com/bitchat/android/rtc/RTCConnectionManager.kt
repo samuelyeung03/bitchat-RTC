@@ -518,12 +518,18 @@ class RTCConnectionManager(
 
         val tsUs = System.currentTimeMillis() * 1000L
         Log.i(LATENCY_TAG, "RECV seq=$seq nal_b=${nalData.size} ts_us=$tsUs")
+        // Receiver-side throughput measurement (aggregated by test script)
+        Log.i("BLE_TPUT_RECV", "RECV_TPUT nal_b=${nalData.size} ts_us=$tsUs")
 
         // Video ACKs disabled — they consume reverse BLE bandwidth without flow-control benefit
         // meshServiceRef?.sendVideoAck(packet.senderID.toHexString(), seq)
 
         val dec = videoDecoder ?: return
-        val yuv420 = dec.decode(nalData) ?: return
+        val yuv420 = dec.decode(nalData)
+        if (yuv420 == null) {
+            Log.w(LATENCY_TAG, "RECV_FAIL seq=$seq nal_b=${nalData.size} ts_us=$tsUs")
+            return
+        }
         videoOutputDevice?.renderFrame(yuv420)
     }
 

@@ -15,6 +15,7 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import java.util.*
+import java.util.concurrent.ConcurrentHashMap
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.Semaphore
@@ -98,6 +99,19 @@ class BluetoothGattClientManager(
     private var throughputBytesSent   = 0L
     private val THROUGHPUT_LOG_TAG    = "BLE_THROUGHPUT"
     private val THROUGHPUT_WINDOW_MS  = 1000L
+
+    /**
+     * Addresses dropped as duplicates — blocked from reconnecting for [BLOCK_DURATION_MS].
+     * Prevents the "announce reject storm" where stopClient() + scan re-fires continuously.
+     */
+    private val droppedDuplicateAddresses = ConcurrentHashMap<String, Long>()
+    private val BLOCK_DURATION_MS = 30_000L
+
+    /** Called by BluetoothConnectionManager when a duplicate connection is dropped. */
+    fun blockAddressAsDuplicate(address: String) {
+        droppedDuplicateAddresses[address] = System.currentTimeMillis() + BLOCK_DURATION_MS
+        Log.i(TAG, "Blocking $address from reconnecting for ${BLOCK_DURATION_MS / 1000}s (duplicate peer)")
+    }
 
     /**
      * When non-null, the scan callback will ONLY attempt to connect to this address.
@@ -388,6 +402,13 @@ class BluetoothGattClientManager(
         val allowlist = scanAllowlist
         if (allowlist != null && deviceAddress.uppercase() !in allowlist) {
             return
+        }
+
+        // Block addresses recently dropped as duplicates to prevent announce-reject storm.
+        val blockExpiry = droppedDuplicateAddresses[deviceAddress]
+        if (blockExpiry != null) {
+            if (System.currentTimeMillis() < blockExpiry) return
+            else droppedDuplicateAddresses.remove(deviceAddress)   // block expired, allow again
         }
 
         // Log.d(TAG, "Received scan result from $deviceAddress - already connected: ${connectionTracker.isDeviceConnected(deviceAddress)}")

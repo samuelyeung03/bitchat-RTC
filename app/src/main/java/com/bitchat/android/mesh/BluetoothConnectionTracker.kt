@@ -224,6 +224,7 @@ class BluetoothConnectionTracker(
             try { it.disconnect() } catch (_: Exception) { }
         }
         cleanupDeviceConnection(deviceAddress)
+        pendingConnections.remove(deviceAddress)   // prevent immediate re-attempt via scan
         Log.d(TAG, "Requested disconnect for $deviceAddress")
     }
 
