@@ -8,9 +8,9 @@ Android peer-to-peer chat + voice/video app using **Bluetooth LE mesh** as the s
 No internet required. Devices discover each other via BLE scan/advertise, exchange messages,
 voice, and video over fragmented GATT packets.
 
-**Package:** `com.bitchat.droid`  
-**Code namespace:** `com.bitchat.android`  
-**Min SDK:** 26 (Android 8)  **Target:** 34  
+**Package:** `com.bitchat.droid`
+**Code namespace:** `com.bitchat.android`
+**Min SDK:** 26 (Android 8)  **Target:** 34
 **NDK:** 27.2.12479018 (arm64-v8a)
 
 ---
@@ -20,13 +20,15 @@ voice, and video over fragmented GATT packets.
 |------|-----------|--------|-------|
 | Pi 5 #1 (sender) | `798f51f064cce0d1` | RPi5/AOSP | Razer Kiyo X on `/dev/video0` |
 | Pi 5 #2 (receiver) | `f501a6221ec14252` | RPi5/AOSP | no camera |
-| Phone sender | `T1AIOC656909KGK` | ASUS ROG Phone 9 (AI2501C) | YUV file or camera |
-| Phone receiver | `dc1c0ad` | Redmi Note 7 (lavender) | Android 9, MTU=256 |
+| Phone sender | `T1AIOC656909KGK` | ASUS ROG Phone 9 (AI2501C, Snapdragon 8 Gen3) | YUV file or camera |
+| Phone receiver | `dc1c0ad` | Redmi Note 7 (lavender, Android 9) | MTU=517 after fix |
 
 Both Pis run AOSP 16 (eng.samuel). Phones run stock Android.
 YUV test file on ASUS: `/data/local/tmp/complex_320x240.yuv` (push from `test/media/`).
+Reference x264 config: `~/libtest/test_x264.cpp` — uses `superfast` preset + zero-latency flags.
 
-**CRITICAL — debug prefs:** `bitchat_debug_settings.xml` persists across installs (not cleared on uninstall on rooted devices). After any `stop_client`/`stop_server` ADB command, these prefs are written and survive restart, silently breaking the mesh. Always reset after testing:
+**CRITICAL — debug prefs:** `bitchat_debug_settings.xml` persists across installs. After any
+`stop_client`/`stop_server` ADB command, prefs are silently corrupted. Always reset:
 ```bash
 cat > /tmp/debug_prefs.xml << 'XML'
 <?xml version='1.0' encoding='utf-8' standalone='yes' ?>
@@ -50,32 +52,61 @@ done
 ## Key components
 
 ### BLE mesh transport
-- `BluetoothMeshService` — top-level orchestrator; holds `rtcConnectionManager`
+- `BluetoothMeshService` — top-level orchestrator; holds `rtcConnectionManager`; `instance` singleton
 - `BluetoothConnectionManager` — starts server + client, manages power mode
-- `BluetoothGattClientManager` — BLE scanning + GATT connects (duty-cycle aware)
-- `BluetoothGattServerManager` — GATT server, advertising
-- `FragmentManager` — fragments large packets to ≤469 B BLE payloads
+- `BluetoothGattClientManager` — BLE scanning + GATT connects; per-device `Semaphore(1)` write flow control
+- `BluetoothGattServerManager` — GATT server, advertising; per-device `Semaphore(1)` notification flow control
+- `BluetoothPacketBroadcaster` — fragments + sends; `clientWriteAwaiter` + `serverNotifyAwaiter` hooks
+- `FragmentManager` — fragments large packets; `MAX_FRAGMENT_SIZE=180` (phones, MTU≤256 era, now MTU=517)
 - BLE service UUID: `f47b5e2d-4a9e-4c5a-9b3f-8e1d2c3a4b5c`
 
 ### Video codec (DACE)
 - `DACEEncoder` / `DACEDecoder` — Kotlin wrappers
 - `DACEWrapper` — JNI bridge to native `dacewrapper.so`
-- `dace_jni.cpp` — x264 DACE encoder; `param.dace=1` enables DACE, `param.dace=0` disables
+- `dace_jni.cpp` — x264 DACE encoder; matches `~/libtest/test_x264.cpp` reference config
 - `RTCConnectionManager` — orchestrates audio + video encode/send/recv/decode
-- Default: 320×240 @ 3 fps, 40 kbps (phones), **`param.dace=1` + `dace_complexity_level=-1` (auto)**
-- **cl ADB mapping (current)**:
-  - `cl=0`  → `param.dace=0`  DACE **OFF** (plain x264 at CL0 analysis effort)
-  - `cl=-1` → `param.dace=1, dace_complexity_level=-1`  DACE **ON auto**
-  - `cl=1-9` → `param.dace=1, dace_complexity_level=N`  DACE **ON fixed**
-- **DO NOT** use `-99` sentinel — it was removed; `cl=0` is DACE off now
-- psy-RD is disabled (`b_psy=0`) for objective PSNR/SSIM — do not re-enable
-- Fixed CL = `param.dace=1`, `dace_complexity_level=0..9`
+- Default: 320×240 @ 3 fps, 40 kbps (phones)
+
+**DACE cl ADB mapping:**
+| `--ei cl N` | `param.dace` | `dace_complexity_level` | Meaning |
+|---|---|---|---|
+| `cl=0` | 0 | — | **DACE OFF** (plain x264, superfast preset) |
+| `cl=-1` | 1 | -1 | **DACE ON auto** (self-regulates complexity) |
+| `cl=1-9` | 1 | N | **DACE ON fixed** (benchmark specific CLs) |
+
+**DO NOT** use `-99` — removed. `cl=0` is DACE OFF.
+psy-RD disabled (`b_psy=0`) for objective PSNR/SSIM.
+SSIM available: `daceEnc.getLastSsimY()` — logged as `ssim=X.XXXX` in SEND log.
+
+**x264 encoder config (dace_jni.cpp):**
+- `x264_param_default_preset(&param, "superfast", "ssim")` → then `apply_profile("baseline")`
+- ABR: `i_bitrate=br/1000`, `i_vbv_max_bitrate=br/1000`, `i_vbv_buffer_size=0` (no VBV delay)
+- `rc.i_aq_mode=1` (adaptive quantisation)
+- Zero-latency: `i_lookahead=0`, `i_sync_lookahead=0`, `i_bframe=0`, `b_sliced_threads=1`, `b_vfr_input=0`, `rc.b_mb_tree=0`
+- `b_psnr=1`, `b_ssim=1`, `b_psy=0`, `f_psy_rd=0`, `f_psy_trellis=0`
+- **IDR spike is unavoidable** with ABR+no-VBV: seq 0 ≈22KB, then ABR corrects. Use steady-state PSNR (skip first 2 frames) for fair comparison.
+
+### BLE throughput (current state)
+- **Observed: ~70 kbps** (phones, WNR + 2M PHY + DLE)
+- **WNR** (`WRITE_TYPE_NO_RESPONSE`): always used for video — `onCharacteristicWrite` fires at stack-enqueue level for WNR, semaphore still works
+- **2M PHY**: requested both client-side (in `onMtuChanged`) AND server-side (in `onConnectionStateChange`)
+- **DLE**: MTU=517 auto-negotiated; `MAX_FRAGMENT_SIZE=180` is now conservative — could increase to ~460 for better efficiency on phones (currently 180 was set for old 256B MTU era)
+- **Notification semaphore**: `onNotificationSent` releases permit for server-notify path
+- **Duplicate connection dedup**: `isPeerAlreadyConnected(peerID)` in `BluetoothMeshService` drops redundant bidirectional connections that split bandwidth
+- **Semaphore(2) HURTS**: Android 9 ATT discards 2nd in-flight WNR → keep `Semaphore(1)`
+- **RECV rate**: ~13-20% at 40kbps (1911B/frame ÷ 180B/frag = ~11 fragments → P(deliver) ≈ 14%)
+- **Next improvement**: increase `MAX_FRAGMENT_SIZE` from 180 to ~460 (MTU=517 → 517-55=462B payload) → 1911/460 = 5 frags → ~40% delivery
 
 ### Test infrastructure
 Located in `test/`:
-- `encode_bench.py` — encode-only benchmark; runs on Pi1 only, no BLE needed. Reads SEND logcat for PSNR + encode time per CL. Supports `--src` YUV file.
-- `ble_psnr_test.py` — full BLE mesh test; measures PSNR, encode time, and end-to-end latency. Supports `--src` YUV file.
+- `ble_psnr_test.py` — full BLE mesh PSNR test; use `--sender T1AIOC656909KGK --receiver dc1c0ad --bitrate 40000 --fps 3`
+- `encode_bench.py` — encode-only (no BLE), Pi1 only
 - `media/` — YUV test files: `complex_320x240.yuv`, `complex_640x360.yuv`, `complex_1920x1080.yuv`
+
+**Latest results CSVs** (phone test 2026-04-16):
+- `test/results_phones_dace_on_60s_v3.csv` — DACE ON 60s run
+- `test/results_phones_dace_off_60s_v3.csv` — DACE OFF 60s run
+- `test/results_phones_dace_comparison_v3.txt` — summary
 
 ---
 
@@ -95,26 +126,34 @@ adb -s <serial> shell am start -n com.bitchat.droid/com.bitchat.android.MainActi
 adb -s <serial> shell am start -n com.bitchat.droid/com.bitchat.android.AdbActivity \
     --es cmd <COMMAND> [extras]
 
-# BLE-specific logcat
-adb -s <serial> shell logcat -s BluetoothMeshService BluetoothConnectionManager \
-    BluetoothGattClientManager BluetoothGattServerManager PeerManager RTCConnectionManager
+# Video PSNR test (phones)
+adb -s T1AIOC656909KGK shell am start -n com.bitchat.droid/com.bitchat.android.AdbActivity \
+  --es cmd start_video --es peer_id <RECV_PEER_HEX> \
+  --ei cl -1 --ei fps 3 --ei bitrate 40000 \
+  --es src /data/local/tmp/complex_320x240.yuv --ei w 320 --ei h 240
+
+# Push YUV test file to phone
+adb -s T1AIOC656909KGK push test/media/complex_320x240.yuv /data/local/tmp/complex_320x240.yuv
+
+# BLE logcat tags of interest
+adb -s <serial> shell logcat -s latency:I BLE_THROUGHPUT:I ADB_CMD:I dace_jni:I
 ```
 
 ## AdbActivity commands
 | cmd | extra args | what it does |
 |-----|-----------|--------------|
-| `peer_id` | — | logs local peer ID → `ADB_CMD:I  PEER_ID <hex>` |
-| `peers` | — | logs all verified peers → `ADB_CMD:I  PEER id=<hex> nick=<nick>` |
-| `start_video` | `--es peer_id <hex>` `--ei cl <0/-1/1-9>` `--ei fps <n>` `--ei bitrate <bps>` [`--es src <path>` `--ei w <w>` `--ei h <h>`] | cl=0=DACE OFF, cl=-1=auto, cl=1-9=fixed |
+| `peer_id` | — | logs `ADB_CMD:I  PEER_ID <hex>` |
+| `peers` | — | logs `ADB_CMD:I  PEER id=<hex> nick=<nick>` |
+| `start_video` | `--es peer_id <hex>` `--ei cl <0/-1/1-9>` `--ei fps <n>` `--ei bitrate <bps>` [`--es src <path>` `--ei w <w>` `--ei h <h>`] | cl=0=OFF, cl=-1=auto, cl=1-9=fixed |
 | `stop_video` | — | stop video |
 | `set_complexity` | `--ei cl <-1..9>` | change CL on running encoder |
-| `stop_client` | — | stop BLE client (scanner) |
+| `stop_client` | — | stop BLE client (**resets debug prefs — reset after!**) |
 | `start_client` | — | start BLE client |
-| `stop_server` | — | stop BLE server (advertiser) |
+| `stop_server` | — | stop BLE server (**resets debug prefs — reset after!**) |
 | `start_server` | — | start BLE server |
 | `stop_scan` | — | stop BLE scanning only |
-| `start_scan` | — | start BLE scanning only |
-| `connect_to` | `--es addr <BLE_MAC>` | pin to single peer, stop scan flood (use to avoid 133 errors) |
+| `start_scan` | — | start BLE scanning |
+| `connect_to` | `--es addr <BLE_MAC>` | pin to one peer; stops 133-flood from random MAC rotation |
 | `unpin` | — | resume normal multi-peer scanning |
 
 ---
@@ -130,99 +169,51 @@ adb -s 798f51f064cce0d1 install -r app/build/outputs/apk/debug/app-debug.apk
 adb -s f501a6221ec14252 install -r app/build/outputs/apk/debug/app-debug.apk
 ```
 
-## Test results (2026-04-16, phones, BLE mesh, 320×240 @3fps, 40kbps, psy off)
+---
 
-### DACE ON vs OFF — ASUS ROG9 → Redmi Note 7
+## Test results
 
-| Mode      | SEND | RECV | PSNR avg | SSIM avg | NAL avg | Enc avg |
-|-----------|------|------|----------|----------|---------|---------|
-| DACE ON (auto, cl=-1) | 5 | 4 | 35.4 dB | 0.887 | 4573 B | 3 ms |
-| DACE OFF (cl=0)       | — | — | 26.5 dB (synthetic) | 0.732 | ~1800 B | 3 ms |
+### DACE ON vs OFF — phones (2026-04-16, definitive)
+**Config:** superfast preset + ssim tune, zero-latency, ABR, psy off, 40kbps, 3fps, 320×240
+**Transport:** WNR + 2M PHY both sides + DLE (MTU=517)
+**Source:** `complex_320x240.yuv`
 
-**Notes:**
-- **WNR + 2M PHY + DLE(MTU=517)**: throughput **158 kbps**, RECV **80%** (4/5)
-- MTU=517 now achieved on both phones (was 256 before); larger frames → better quality
-- PSNR/SSIM objective: psy-RD disabled (`b_psy=0`)
-- DACE ON: +0.7 dB PSNR, +0.022 SSIM over OFF (from synthetic frame comparison)
-- DACE ON enc=3ms on Snapdragon 8 Gen3 at auto complexity
+| Mode | SEND | RECV | tput | PSNR avg | PSNR ss | SSIM avg | SSIM ss | NAL avg | Enc avg |
+|------|------|------|------|----------|---------|----------|---------|---------|---------|
+| DACE ON (cl=-1) | 51 | 10 | 72 kbps | 29.88 dB | 29.35 dB | 0.817 | 0.810 | 1911 B | 13.5 ms |
+| DACE OFF (cl=0) | 81 | 11 | 68 kbps | 26.97 dB | 26.57 dB | 0.741 | 0.735 | 1826 B |  4.8 ms |
 
-### BLE throughput (updated 2026-04-16)
-- **Before**: `WRITE_TYPE_DEFAULT` + Sem=1 = 43 kbps, ~10% RECV
-- **After**: WNR + 2M PHY both sides + DLE + notif flow ctrl = **158 kbps**, **~80% RECV**
-- WNR: `onCharacteristicWrite` fires at stack-enqueue (not after peer response) → halves per-fragment time
-- 2M PHY: now requested on **server side** too (`BluetoothGattServerManager`); halves time-on-air
-- DLE: MTU=517 → LL PDU=524B → 244B ATT payload/packet; no code needed (OS auto on API 26+)
-- Notification semaphore: `onNotificationSent` releases permit; prevents server notification flood
-- Duplicate connection dedup: `isPeerAlreadyConnected(peerID)` drops redundant bidirectional links
-- `Semaphore(2)` HURTS on Android 9 (ATT discards 2nd in-flight WNR) → keep `Semaphore(1)`
-- **VBV buffering**: x264 buffers output until VBV buffer fills. Set `i_vbv_buffer_size=0` (disabled)
-  to get immediate frame output. On Pi5s the VBV buffer filled fast enough to be invisible.
-- **Debug prefs corruption**: `stop_client`/`stop_server` ADB commands persist prefs
-  (`max_connections=1`, `gatt_client_enabled=false`) across restarts. Always reset (see above).
-- **BLE status 133 flood**: random BLE addressing causes many failed connect attempts.
-  Use `connect_to --es addr <MAC>` to pin to one peer after scanning briefly.
-- **WRITE_TYPE_NO_RESPONSE + flow control**: WNR IS safe with `awaitWritePermit` — Android fires
-  `onCharacteristicWrite` at stack-enqueue level for WNR (not after peer ACK). Previous belief
-  that WNR caused deadlock was WRONG — that was a different issue (Semaphore(2) on Android 9).
-- **Semaphore(2) HURTS on Android 9**: Android 9 ATT stack discards the 2nd in-flight WNR write →
-  use `Semaphore(1)` for reliability
-  `WRITE_TYPE_DEFAULT` — NO_RESPONSE writes never trigger `onCharacteristicWrite`, causing deadlock.
-- **Psy-RD**: disabled (`b_psy=0`) in dace_jni.cpp so PSNR/SSIM are objective metrics.
-  x264 warns "psnr used with psy on: results will be invalid" if psy is enabled alongside b_psnr.
-- **ADB_CMD logcat timing**: phones need 3-4s after `am start AdbActivity` before log appears.
-  Old 1.2s sleep from Pi5 code was insufficient — use 4s.
+**Delta: DACE ON +2.9 dB PSNR, +0.076 SSIM, 3× slower encode**
+ss = steady-state (skip first 2 frames — IDR spike artificially lowers first-frame PSNR)
 
-## Test results (2026-04-08, Pi5, BLE mesh, 320×240 @5fps, 100kbps)
+### DACE ON vs OFF — Pi5s (2026-04-08, encode-side only)
+**Config:** 100kbps, 5fps, 320×240
+| Mode | PSNR avg | Enc avg | NAL avg |
+|------|----------|---------|---------|
+| auto   | 42.7 dB | 46 ms | 2567 B |
+| CL0    | 43.4 dB |  6 ms | 2496 B |
+| CL1-5  | 43-44 dB | 5-18 ms | 2400-2520 B |
 
-### Encoder-side PSNR + timing (definitive, all CLs)
+---
 
-| Mode   | PSNR avg | PSNR min | Enc avg | NAL avg |
-|--------|----------|----------|---------|---------|
-| auto   | 42.7 dB  | 36.0 dB  | 46 ms   | 2567 B  |
-| CL0    | 43.4 dB  | 42.4 dB  |  6 ms   | 2496 B  |
-| CL1    | 43.0 dB  | 40.3 dB  |  5 ms   | 2416 B  |
-| CL2    | 43.2 dB  | 41.3 dB  |  9 ms   | 2439 B  |
-| CL3    | 43.6 dB  | 42.7 dB  | 12 ms   | 2519 B  |
-| CL4    | 43.9 dB  | 43.0 dB  | 18 ms   | 2512 B  |
-| CL5    | 43.9 dB  | 43.0 dB  | 18 ms   | 2517 B  |
+## Known issues & gotchas
 
-**Key findings:**
-- **Encode time** scales clearly with CL: CL0=6ms, CL1=5ms, CL2=9ms, CL3=12ms, CL4/5=18ms, auto=46ms.
-- **PSNR is roughly constant (~43 dB)** across all fixed CLs — DACE CL affects CPU cost, not quality (bitrate-limited).
-- **DACE auto (CL=-1) has 46ms encode time** — 8× slower than CL0 — adapting to scene complexity. No PSNR gain vs fixed CLs.
-- **NAL size stable ~2400-2570 B** — encoder fills the 100kbps budget regardless of CL.
-- PSNR is **encoder-side** (x264 reconstructed vs input). BLE transport does not affect this metric.
-
-### BLE transport observations
-- **Packet delivery: ~3-37% at 5fps** — 5fps × 2500B/frame = 12.5 KB/s exceeds sustained BLE mesh budget.
-- Each frame = ~6 BLE fragments (2500B / 469B). At 10ms pacing = 60ms per frame.
-- `CONNECTION_PRIORITY_HIGH` (7.5ms interval) set, MTU=517. Theoretical max ~35 KB/s but practical is lower.
-- `WRITE_TYPE_NO_RESPONSE` + `notifyCharacteristicChanged(confirm=false)` applied for video.
-- Remaining bottleneck: Android GATT stack serialises writes; need ≥1 connection interval between writes.
-- **Next steps**: reduce bitrate to 40kbps (→ ~1000B/frame = 3 fragments = 30ms/frame), or drop to 2fps.
-
-### ADB test commands
-```bash
-# Encode-only (Pi1 only, no BLE needed)
-python3 test/encode_bench.py --src /data/local/tmp/complex_320x240.yuv             # full sweep: auto + CL0-9
-python3 test/encode_bench.py --src /data/local/tmp/complex_320x240.yuv --cls -1 0  # quick DACE on/off
-
-# BLE mesh end-to-end
-python3 test/ble_psnr_test.py --src /data/local/tmp/complex_320x240.yuv --duration 20  # full sweep
-python3 test/ble_psnr_test.py --duration 30 --cls -1 0  # quick, live camera
-```
-
-### Known hardware issue
-- Pi1 (798f) loses clock on power-off → always run `adb -s 798f51f064cce0d1 root && adb shell date -s @$(date +%s)` after Pi1 reboots.
-- Staggered startup required: start Pi1 first, wait 8s, then start Pi2 so Pi2 scans and finds Pi1.
+- **IDR spike**: ABR without VBV — seq 0 ≈22KB, seq 1 ≈11B, then settles. Use steady-state PSNR (NR>2) for fair comparison.
+- **MAX_FRAGMENT_SIZE=180**: conservative for old 256B MTU era. MTU is now 517 on phones — could raise to ~460 for 2× delivery improvement (would halve fragment count from ~11 to ~5).
+- **RECV variability**: 0-20% across runs — BLE radio + Android 9 ATT stack is the bottleneck.
+- **ADB BluetoothMeshService not running**: app may restart between test passes. Always call `am start MainActivity` before each AdbActivity call in scripts, not just once.
+- **ADB_CMD logcat delay**: phones need 4-5s after `am start AdbActivity` before log appears.
+- **Duplicate BLE connections**: two devices each scanning each other creates 2 connections sharing bandwidth. `isPeerAlreadyConnected()` dedup runs at first-ANNOUNCE time — not instantaneous. Check `Periodic cleanup: N connections` — ideally N=1 per peer.
+- **Semaphore(2) HURTS on Android 9**: ATT layer drops 2nd concurrent WNR write → `Semaphore(1)` only.
+- **WNR + semaphore is safe**: `onCharacteristicWrite` fires for WNR at stack-enqueue, not after peer ACK. No deadlock.
+- **Pi5 clock reset needed**: `adb -s 798f... root && adb shell date -s @$(date +%s)` after reboot.
 
 ## User preferences
 - Be concise — no summaries, no preamble
 - Commit after each meaningful change
 - cl=0 = DACE OFF; cl=-1 = DACE auto ON; cl=1-9 = DACE fixed ON
-- **DO NOT** use -99 sentinel anymore — it was removed
-- Use `encode_bench.py` for fast encoder-only sweeps; use `ble_psnr_test.py` for full BLE end-to-end
-- Prefer `--src /data/local/tmp/complex_320x240.yuv` over camera for reproducible results
-- After ADB stop_client/stop_server, ALWAYS reset debug prefs (see Hardware setup section)
-- ble_psnr_test.py: use `--sender`/`--receiver` for phone serials; `--bitrate 40000` for phones
-- BLE delivery varies run-to-run (0-10/90 RECV) — BLE radio is the bottleneck, not code
+- Reference x264 config is in `~/libtest/test_x264.cpp` — match it
+- `PSNR/SSIM` are objective (psy off). IDR spike skews "all-frames" avg — use steady-state
+- Use `--src /data/local/tmp/complex_320x240.yuv` for reproducible results
+- After stop_client/stop_server, ALWAYS reset debug prefs
+- ble_psnr_test.py: `--sender T1AIOC656909KGK --receiver dc1c0ad --bitrate 40000 --fps 3`
