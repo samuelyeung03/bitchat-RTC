@@ -62,10 +62,13 @@ done
 - `DACEWrapper` — JNI bridge to native `dacewrapper.so`
 - `dace_jni.cpp` — x264 DACE encoder; `param.dace=1` enables DACE, `param.dace=0` disables
 - `RTCConnectionManager` — orchestrates audio + video encode/send/recv/decode
-- Default: 320×240 @ 15 fps, 100 kbps, **`param.dace=1` + `dace_complexity_level=-1` (auto)**
-- DACE CL range: **-1 (auto) and 0–9** (fixed)
-- DACE OFF = `param.dace=0` (do NOT change analysis params, just flip the flag)
-- DACE auto ON = `param.dace=1`, `dace_complexity_level=-1`
+- Default: 320×240 @ 3 fps, 40 kbps (phones), **`param.dace=1` + `dace_complexity_level=-1` (auto)**
+- **cl ADB mapping (current)**:
+  - `cl=0`  → `param.dace=0`  DACE **OFF** (plain x264 at CL0 analysis effort)
+  - `cl=-1` → `param.dace=1, dace_complexity_level=-1`  DACE **ON auto**
+  - `cl=1-9` → `param.dace=1, dace_complexity_level=N`  DACE **ON fixed**
+- **DO NOT** use `-99` sentinel — it was removed; `cl=0` is DACE off now
+- psy-RD is disabled (`b_psy=0`) for objective PSNR/SSIM — do not re-enable
 - Fixed CL = `param.dace=1`, `dace_complexity_level=0..9`
 
 ### Test infrastructure
@@ -145,8 +148,15 @@ adb -s f501a6221ec14252 install -r app/build/outputs/apk/debug/app-debug.apk
 - Each 1800B frame = ~12 fragments → P(deliver at p=15%) ≈ 14% — matches 10/90 (11%)
 - **Next step to raise RECV**: reduce bitrate further to 20kbps (→ 6 fragments → 40% delivery)
 
-### Known phone-specific issues (vs Pi5s)
-- **MTU=256** on phones (vs MTU=517 on Pi5s) → `MAX_FRAGMENT_SIZE` must be ≤180B (not 500B)
+### BLE throughput analysis
+- **Observed: ~43 kbps** on Redmi Note 7 (Android 9) with `WRITE_TYPE_DEFAULT` + `Semaphore(1)`
+- Theoretical max at 7.5ms HIGH priority: 96 kbps; Android 9 GATT overhead reduces to ~43 kbps
+- Each ATT Write Request + Write Response = ~2 connection events = ~41ms round-trip measured
+- `Semaphore(2)` (2 in-flight writes) tested but HURTS delivery on Android 9 — Android 9 ATT
+  discards second in-flight write → keep `Semaphore(1)`
+- `CONNECTION_PRIORITY_HIGH` now requested immediately on connect + re-requested after MTU
+- `WRITE_TYPE_NO_RESPONSE` cannot be used when flow-control semaphore is active — callback never fires → deadlock
+- Fragment size 180B + ~40B headers = ~220B wire; 220 < 256B MTU → no fragmentation of fragments
 - **VBV buffering**: x264 buffers output until VBV buffer fills. Set `i_vbv_buffer_size=0` (disabled)
   to get immediate frame output. On Pi5s the VBV buffer filled fast enough to be invisible.
 - **Debug prefs corruption**: `stop_client`/`stop_server` ADB commands persist prefs
@@ -207,9 +217,10 @@ python3 test/ble_psnr_test.py --duration 30 --cls -1 0  # quick, live camera
 ## User preferences
 - Be concise — no summaries, no preamble
 - Commit after each meaningful change
-- DACE param: `param.dace=0/1` is on/off switch; `dace_complexity_level=-1` = truly auto
-- cl=-99 via ADB = DACE OFF (sentinel value → sets param.dace=0 in JNI)
+- cl=0 = DACE OFF; cl=-1 = DACE auto ON; cl=1-9 = DACE fixed ON
+- **DO NOT** use -99 sentinel anymore — it was removed
 - Use `encode_bench.py` for fast encoder-only sweeps; use `ble_psnr_test.py` for full BLE end-to-end
 - Prefer `--src /data/local/tmp/complex_320x240.yuv` over camera for reproducible results
 - After ADB stop_client/stop_server, ALWAYS reset debug prefs (see Hardware setup section)
-- ble_psnr_test.py: use `--sender`/`--receiver` for phone serials; script auto-detects peer ID
+- ble_psnr_test.py: use `--sender`/`--receiver` for phone serials; `--bitrate 40000` for phones
+- BLE delivery varies run-to-run (0-10/90 RECV) — BLE radio is the bottleneck, not code
