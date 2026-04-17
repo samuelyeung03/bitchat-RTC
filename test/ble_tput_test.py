@@ -32,7 +32,7 @@ import sys
 import time
 
 # ── defaults ──────────────────────────────────────────────────────────────────
-SENDER        = "T1AIOC656909KGK"
+SENDER        = "dc1c0ad"
 RECEIVER      = "8e27af28"
 RECEIVER_PEER = "fea25dd05ccc26a6"
 PACKAGE       = "com.bitchat.droid"
@@ -159,14 +159,18 @@ def _kbps_from_rows(rows):
 # ── ramp step ─────────────────────────────────────────────────────────────────
 
 def _ramp_step(sender, receiver, receiver_peer, target_bps, payload_bytes, dur):
-    """Send for dur seconds at target_bps; return (snd_kbps, rcv_kbps, dup_factor)."""
+    """Send for dur seconds at target_bps; return (snd_kbps, rcv_kbps, dup_factor).
+
+    rcv_kbps may be 0 on old builds that lack handleIncomingVideo logging.
+    Ceiling detection uses snd_kbps plateau regardless of rcv.
+    """
     bits_per_pkt = payload_bytes * 8
     delay_ms     = max(0, round(bits_per_pkt * 1000 / target_bps) - 1)
 
     adb(sender,   "shell", "logcat", "-c", timeout=5)
     adb(receiver, "shell", "logcat", "-c", timeout=5)
-    sp, sf = start_logcat_stream(sender,   ["BLE_TPUT:I"], "/tmp/ble_tput_send.log")
-    rp, rf = start_logcat_stream(receiver, ["latency:I"],  "/tmp/ble_tput_recv.log")
+    sp, sf = start_logcat_stream(sender,   ["BLE_TPUT:I"],  "/tmp/ble_tput_send.log")
+    rp, rf = start_logcat_stream(receiver, ["latency:I"],   "/tmp/ble_tput_recv.log")
     time.sleep(0.2)
 
     broadcast(sender, cmd="start_tput", peer_id=receiver_peer,
@@ -184,7 +188,8 @@ def _ramp_step(sender, receiver, receiver_peer, target_bps, payload_bytes, dur):
     snd = _kbps_from_rows(snd_rows)
     rcv = _kbps_from_rows(rcv_rows)
 
-    dup = max(1, round(rcv / snd)) if snd > 1.0 else 1
+    # Correct for duplicate connections (rcv ≈ 2× snd)
+    dup = max(1, round(rcv / snd)) if snd > 1.0 and rcv > 0 else 1
     return snd, rcv / dup, dup
 
 
@@ -196,20 +201,18 @@ def run_ramp(sender, receiver, receiver_peer, start, step, dur, threshold,
     print(f"\n{'═'*62}")
     print(f"  BITRATE RAMP  payload={payload_bytes}B/pkt (sequential)")
     print(f"  start={start//1000}k  step={step//1000}k  dur={dur}s  threshold={threshold}%")
-    print(f"  snd = actual BLE write rate  |  rcv = receiver byte rate")
+    print(f"  snd = BLE write rate  |  rcv = receiver rate (0 = old build, using snd/target)")
     print(f"{'═'*62}\n")
 
-    def _row(arrow, target, snd, rcv, dup, ok):
-        deliv  = 100.0 * rcv / snd if snd > 0 else 0.0
-        if rcv == 0.0 and snd > 5.0:
-            status = "DISC"
-        elif ok:
-            status = "OK  "
+    def _row(arrow, target, snd, rcv, dup, ok, deliv):
+        if rcv > 0:
+            deliv_str = f"{deliv:5.1f}%(rcv)"
         else:
-            status = "LOSS"
+            deliv_str = f"{deliv:5.1f}%(snd)"
+        status = "OK  " if ok else "LOSS"
         dup_s = f" ×{dup}" if dup > 1 else "   "
         print(f"  {arrow} {target//1000:>4}k  snd={snd:6.1f}  rcv={rcv:6.1f}"
-              f"  deliv={deliv:5.1f}%{dup_s}  [{status}]", flush=True)
+              f"  deliv={deliv_str}{dup_s}  [{status}]", flush=True)
 
     def _reconnect_if_needed():
         bring_to_foreground(sender)
@@ -241,11 +244,16 @@ def run_ramp(sender, receiver, receiver_peer, start, step, dur, threshold,
     while True:
         snd, rcv, dup = _ramp_step(sender, receiver, receiver_peer,
                                     target, payload_bytes, dur)
-        deliv      = 100.0 * rcv / snd if snd > 0 else 0.0
+        # delivery%: use rcv/snd when available; fall back to snd/target when rcv=0
+        # (old builds don't log RECV, so rcv=0 — use sender-side wire rate as proxy)
+        if rcv > 0:
+            deliv = 100.0 * rcv / snd if snd > 0 else 0.0
+        else:
+            deliv = 100.0 * snd / (target / 1000) if target > 0 else 0.0
         ok         = deliv >= threshold
         at_ceiling = prev_snd > 0 and snd < prev_snd * 1.05
 
-        _row("↑", target, snd, rcv, dup, ok)
+        _row("↑", target, snd, rcv, dup, ok, deliv)
 
         if at_ceiling and ok:
             print(f"  [ramp] BLE ceiling ~{snd:.0f} kbps — stopping")
@@ -269,9 +277,10 @@ def run_ramp(sender, receiver, receiver_peer, start, step, dur, threshold,
         while target >= start:
             snd, rcv, dup = _ramp_step(sender, receiver, receiver_peer,
                                         target, payload_bytes, dur)
-            deliv = 100.0 * rcv / snd if snd > 0 else 0.0
+            deliv = (100.0 * rcv / snd if rcv > 0 and snd > 0 else
+                     100.0 * snd / (target / 1000) if target > 0 and snd > 0 else 0.0)
             ok    = deliv >= threshold
-            _row("↓", target, snd, rcv, dup, ok)
+            _row("↓", target, snd, rcv, dup, ok, deliv)
 
             if ok:
                 max_ok = target
