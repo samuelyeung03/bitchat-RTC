@@ -83,7 +83,10 @@ class FragmentManager {
         }
         
         Log.d(TAG, "Creating ${fragmentChunks.size} fragments for ${fullData.size} byte packet (iOS compatible)")
-        
+        if (packet.type == MessageType.VIDEO.value && fragmentChunks.size > 1) {
+            Log.i("BLE_FRAG", "FRAG_SEND total=${fragmentChunks.size} size=${fullData.size}")
+        }
+
         // iOS: for (index, fragment) in fragments.enumerated()
         for (index in fragmentChunks.indices) {
             val fragmentData = fragmentChunks[index]
@@ -159,6 +162,9 @@ class FragmentManager {
             
             // iOS: incomingFragments[fragmentID]?[index] = Data(fragmentData)
             incomingFragments[fragmentIDString]?.put(fragmentPayload.index, fragmentPayload.data)
+            if (fragmentPayload.originalType == MessageType.VIDEO.value) {
+                Log.i("BLE_FRAG", "FRAG_RECV idx=${fragmentPayload.index} total=${fragmentPayload.total}")
+            }
             if (fragmentPayload.index == 0){
                 debugManager?.measureBitrate(0,0)
             }
@@ -167,6 +173,9 @@ class FragmentManager {
             val fragmentMap = incomingFragments[fragmentIDString]
             if (fragmentMap != null && fragmentMap.size == fragmentPayload.total) {
                 debugManager?.measureBitrate(1,fragmentMap.size)
+                if (fragmentPayload.originalType == MessageType.VIDEO.value) {
+                    Log.i("BLE_FRAG", "FRAG_DONE total=${fragmentPayload.total}")
+                }
                 Log.d(TAG, "All fragments received for $fragmentIDString, reassembling...")
                 
                 // iOS reassembly logic: for i in 0..<total { if let fragment = fragments[i] { reassembled.append(fragment) } }

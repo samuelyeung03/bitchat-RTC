@@ -51,14 +51,28 @@ class AdbBroadcastReceiver : BroadcastReceiver() {
                     val src  = intent.getStringExtra("src")
                     val w    = intent.getIntExtra("w", com.bitchat.android.util.AppConstants.Dace.DEFAULT_WIDTH)
                     val h    = intent.getIntExtra("h", com.bitchat.android.util.AppConstants.Dace.DEFAULT_HEIGHT)
-                    Log.i(TAG, "start_video peer=$peerId cl=$cl fps=$fps bitrate=$bitrate mode=${if (src.isNullOrBlank()) "camera" else "file:$src"} size=${w}x${h}")
+                    val tput = intent.getBooleanExtra("tput", false)
+                    Log.i(TAG, "start_video peer=$peerId cl=$cl fps=$fps bitrate=$bitrate mode=${if (src.isNullOrBlank()) "camera" else "file:$src"} size=${w}x${h} tput=$tput")
                     ms.rtcConnectionManager.startVideo(ms.myPeerID, peerId,
                         complexityLevel = cl, fps = fps, bitrate = bitrate,
-                        sourcePath = src, sourceWidth = w, sourceHeight = h)
+                        sourcePath = src, sourceWidth = w, sourceHeight = h,
+                        bypassEncode = tput)
                 }
             }
 
             "stop_video"      -> { Log.i(TAG, "stop_video"); ms.rtcConnectionManager.stopVideo() }
+            "start_tput"      -> {
+                val peerId = intent.getStringExtra("peer_id")
+                if (peerId.isNullOrBlank()) {
+                    Log.e(TAG, "ERROR start_tput requires --es peer_id <hex>")
+                } else {
+                    val bytes   = intent.getIntExtra("bytes", 450)
+                    val delayMs = intent.getLongExtra("delay_ms", 0L)
+                    Log.i(TAG, "start_tput peer=$peerId bytes=$bytes delay_ms=$delayMs")
+                    ms.startTput(peerId, bytes, delayMs)
+                }
+            }
+            "stop_tput"       -> { Log.i(TAG, "stop_tput"); ms.stopTput() }
             "set_complexity"  -> { val cl = intent.getIntExtra("cl", -1); Log.i(TAG, "set_complexity cl=$cl"); ms.rtcConnectionManager.setVideoComplexity(cl) }
             "stop_client"     -> { Log.i(TAG, "stop_client");  ms.stopClient() }
             "start_client"    -> { Log.i(TAG, "start_client"); ms.startClient() }

@@ -65,6 +65,8 @@ def broadcast(serial, **extras):
     for k, v in extras.items():
         if isinstance(v, bool):
             cmd += ["--ez", k, "true" if v else "false"]
+        elif k == "delay_ms":
+            cmd += ["--el", k, str(v)]   # Long extra for delay_ms
         elif isinstance(v, int):
             cmd += ["--ei", k, str(v)]
         else:
@@ -129,10 +131,42 @@ SEND_RE = re.compile(
     r"SEND seq=(\d+) cl=(-?\d+) nal_b=(\d+) psnr=([\d.]+) ssim=([\d.]+) "
     r"enc_us=(\d+) ts_us=(\d+)"
 )
-RECV_RE      = re.compile(r"RECV seq=(\d+) nal_b=(\d+) ts_us=(\d+)")
-RECV_FAIL_RE = re.compile(r"RECV_FAIL seq=(\d+) nal_b=(\d+) ts_us=(\d+)")
-TPUT_RECV_RE = re.compile(r"RECV_TPUT nal_b=(\d+) ts_us=(\d+)")
-BLE_TPUT_RE  = re.compile(r"kbps=([\d.]+)")
+RECV_RE       = re.compile(r"RECV seq=(\d+) nal_b=(\d+) ts_us=(\d+)")
+RECV_FAIL_RE  = re.compile(r"RECV_FAIL seq=(\d+) nal_b=(\d+) ts_us=(\d+)")
+TPUT_RECV_RE  = re.compile(r"RECV_TPUT nal_b=(\d+) ts_us=(\d+)")
+BLE_TPUT_RE   = re.compile(r"kbps=([\d.]+)")
+FRAG_SEND_RE  = re.compile(r"FRAG_SEND total=(\d+) size=(\d+)")
+FRAG_RECV_RE  = re.compile(r"FRAG_RECV idx=(\d+) total=(\d+)")
+FRAG_DONE_RE  = re.compile(r"FRAG_DONE total=(\d+)")
+
+
+# ── real-time logcat streaming ─────────────────────────────────────────────────
+
+def start_logcat_stream(serial, tags, filepath):
+    """Stream logcat in real time to a local file. Returns (proc, file_handle)."""
+    tag_args = []
+    for t in tags:
+        tag_args += ["-s", t]
+    f = open(filepath, "w+")
+    proc = subprocess.Popen(
+        ["adb", "-s", serial, "shell", "logcat"] + tag_args,
+        stdout=f, stderr=subprocess.DEVNULL, text=True
+    )
+    return proc, f
+
+
+def stop_logcat_stream(proc, fh):
+    """Terminate streaming, flush, return full log text."""
+    proc.terminate()
+    try:
+        proc.wait(timeout=3)
+    except subprocess.TimeoutExpired:
+        proc.kill()
+    fh.flush()
+    fh.seek(0)
+    content = fh.read()
+    fh.close()
+    return content
 
 
 def parse_send(logcat_text):
@@ -151,10 +185,14 @@ def parse_send(logcat_text):
 
 
 def parse_recv(logcat_text):
+    """Parse RECV entries, deduplicating by seq (duplicate connections produce duplicate log lines)."""
+    seen = set()
     rows = []
     for m in RECV_RE.finditer(logcat_text):
-        rows.append({"seq": int(m.group(1)), "nal_b": int(m.group(2)),
-                     "ts_us": int(m.group(3))})
+        seq = int(m.group(1))
+        if seq not in seen:
+            seen.add(seq)
+            rows.append({"seq": seq, "nal_b": int(m.group(2)), "ts_us": int(m.group(3))})
     return rows
 
 
@@ -192,6 +230,24 @@ def recv_bitrate_kbps(tput_recv_rows):
         return 0.0
     total_bits = sum(nb for nb, _ in tput_recv_rows) * 8
     return total_bits / elapsed_s / 1000.0
+
+
+def parse_frag_stats(sender_log, receiver_log):
+    """Return (frags_sent, frags_recv, frames_done) from BLE_FRAG logs.
+
+    Duplicate BLE connections cause each fragment to arrive twice.  We detect
+    this by comparing raw frags_recv to frags_sent: if frags_recv > frags_sent
+    by roughly 2×, halve the counts so the delivery % is meaningful.
+    """
+    frags_sent  = sum(int(m.group(1)) for m in FRAG_SEND_RE.finditer(sender_log))
+    frags_recv_raw  = len(FRAG_RECV_RE.findall(receiver_log))
+    frames_done_raw = len(FRAG_DONE_RE.findall(receiver_log))
+    # Detect duplicate-connection inflation: if receiver saw ~2× the sent frags,
+    # divide by 2 (integer division keeps it conservative).
+    dup_factor = max(1, round(frags_recv_raw / frags_sent)) if frags_sent > 0 else 1
+    frags_recv  = frags_recv_raw  // dup_factor
+    frames_done = frames_done_raw // dup_factor
+    return frags_sent, frags_recv, frames_done, dup_factor
 
 
 def stat(vals):
@@ -243,11 +299,22 @@ def run_pass(sender, receiver, receiver_peer, cl, fps, bitrate, duration, src, w
     adb(receiver, "shell", "logcat", "-c", timeout=5)
     time.sleep(0.3)
 
+    # Start real-time log streaming to local temp files (avoids ring-buffer overflow)
+    send_log_path = f"/tmp/ble_dace_send_{sender}.log"
+    recv_log_path = f"/tmp/ble_dace_recv_{receiver}.log"
+    sender_proc, sender_fh = start_logcat_stream(
+        sender,   ["latency:I", "BLE_THROUGHPUT:I", "BLE_FRAG:I"], send_log_path)
+    receiver_proc, receiver_fh = start_logcat_stream(
+        receiver, ["latency:I", "BLE_TPUT_RECV:I",  "BLE_FRAG:I"], recv_log_path)
+    time.sleep(0.2)   # let adb logcat connect before test starts
+
     bring_to_foreground(sender)
     extras = dict(cmd="start_video", peer_id=receiver_peer,
                   cl=cl, fps=fps, bitrate=bitrate, w=w, h=h)
     if src:
         extras["src"] = src
+    if throughput_mode:
+        extras["tput"] = True
     broadcast(sender, **extras)
 
     t0 = time.time()
@@ -255,61 +322,249 @@ def run_pass(sender, receiver, receiver_peer, cl, fps, bitrate, duration, src, w
         time.sleep(10)
         wake_screen(sender)
         elapsed = time.time() - t0
-        send_now = adb(sender, "shell", "logcat", "-d", "-s", "latency:I",
-                       timeout=5).count("SEND seq")
-        tput_lines = adb(sender, "shell", "logcat", "-d", "-s", "BLE_THROUGHPUT:I",
-                         timeout=5).strip().splitlines()
-        kbps = "n/a"
-        if tput_lines:
-            m = BLE_TPUT_RE.search(tput_lines[-1])
-            if m:
-                kbps = m.group(1)
+        try:
+            with open(send_log_path) as f:
+                cur = f.read()
+            send_now = cur.count("SEND seq")
+            tput_lines = [l for l in cur.splitlines() if "kbps=" in l]
+            kbps = "n/a"
+            if tput_lines:
+                m = BLE_TPUT_RE.search(tput_lines[-1])
+                if m:
+                    kbps = m.group(1)
+        except OSError:
+            send_now, kbps = "?", "n/a"
         print(f"    {elapsed:4.0f}s  SEND={send_now}  ble_link={kbps}kbps", flush=True)
 
     broadcast(sender, cmd="stop_video")
     time.sleep(2)
 
-    send_log      = adb(sender,   "shell", "logcat", "-d", "-s", "latency:I",      timeout=8)
-    recv_log      = adb(receiver, "shell", "logcat", "-d", "-s", "latency:I",      timeout=8)
-    tput_send_log = adb(sender,   "shell", "logcat", "-d", "-s", "BLE_THROUGHPUT:I", timeout=5)
-    tput_recv_log = adb(receiver, "shell", "logcat", "-d", "-s", "BLE_TPUT_RECV:I",  timeout=5)
+    send_log = stop_logcat_stream(sender_proc,   sender_fh)
+    recv_log = stop_logcat_stream(receiver_proc, receiver_fh)
 
     send_rows      = parse_send(send_log)
     recv_rows      = parse_recv(recv_log)
     recv_fail_rows = parse_recv_fail(recv_log)
-    tput_recv_rows = parse_tput_recv(tput_recv_log)
-    ble_kbps_vals  = [float(m.group(1)) for m in BLE_TPUT_RE.finditer(tput_send_log)]
+    tput_recv_rows = parse_tput_recv(recv_log)
+    ble_kbps_vals  = [float(m.group(1)) for m in BLE_TPUT_RE.finditer(send_log)]
     ble_tput_avg   = statistics.mean(ble_kbps_vals) if ble_kbps_vals else 0.0
 
-    s = summarise(send_rows, recv_rows, recv_fail_rows, tput_recv_rows, ble_tput_avg)
-    s["cl"] = cl
-    s["label"] = label
+    frags_sent, frags_recv, frames_done, dup_factor = parse_frag_stats(send_log, recv_log)
+    if dup_factor > 1:
+        print(f"  [warn] duplicate BLE connections detected (×{dup_factor}) — "
+              f"frag/frame counts divided by {dup_factor}")
+
+    s = summarise(send_rows, recv_rows, recv_fail_rows, tput_recv_rows,
+                  ble_tput_avg / dup_factor)
+    s["recv_kbps"] = s["recv_kbps"] / dup_factor
+    s["cl"]          = cl
+    s["label"]       = label
+    s["frags_sent"]  = frags_sent
+    s["frags_recv"]  = frags_recv
+    s["frames_done"] = frames_done
+    s["dup_factor"]  = dup_factor
     return s, send_rows, recv_rows
 
 
 # ── throughput summary printer ────────────────────────────────────────────────
 
 def print_throughput_summary(results_list):
-    print("\n" + "═" * 72)
+    print("\n" + "═" * 88)
     print("  THROUGHPUT RESULTS")
-    print("═" * 72)
-    hdr = (f"{'Mode':<18} {'SEND':>5} {'RECV':>5} {'deliv%':>7}  "
-           f"{'enc kbps':>9} {'ble snd':>8} {'ble rcv':>8}  {'lat avg':>8} {'lat p95':>8}")
+    print("═" * 88)
+    hdr = (f"{'Mode':<18} {'SEND':>5} {'RECV':>5} {'frm%':>6}  "
+           f"{'f_snt':>6} {'f_rcv':>6} {'frag%':>6}  "
+           f"{'ble snd':>8} {'ble rcv':>8}  {'lat avg':>8} {'lat p95':>8}")
     print(hdr)
-    print("─" * 72)
+    print("─" * 88)
     for s in results_list:
-        delivery = 100.0 * s["recv"] / s["send"] if s["send"] > 0 else 0.0
+        frame_pct = 100.0 * s["recv"] / s["send"] if s["send"] > 0 else 0.0
+        frag_pct  = (100.0 * s["frags_recv"] / s["frags_sent"]
+                     if s.get("frags_sent", 0) > 0 else float("nan"))
         lat_avg  = s["lat_us"]["avg"] / 1000 if s["lat_us"]["n"] > 0 else float("nan")
         lat_p95  = s["lat_us"].get("p95", float("nan")) / 1000 if s["lat_us"]["n"] > 0 else float("nan")
+        frag_pct_str = f"{frag_pct:5.1f}%" if not (frag_pct != frag_pct) else "  n/a "
         print(
-            f"{s['label']:<18} {s['send']:>5} {s['recv']:>5} {delivery:>6.1f}%  "
-            f"{s['enc_kbps']:>8.1f} {s['ble_kbps']:>8.1f} {s['recv_kbps']:>8.1f}  "
+            f"{s['label']:<18} {s['send']:>5} {s['recv']:>5} {frame_pct:>5.1f}%  "
+            f"{s.get('frags_sent',0):>6} {s.get('frags_recv',0):>6} {frag_pct_str:>6}  "
+            f"{s['ble_kbps']:>8.1f} {s['recv_kbps']:>8.1f}  "
             f"{lat_avg:>7.1f}ms {lat_p95:>7.1f}ms"
         )
-    print("═" * 72)
-    print("  enc kbps = x264 encoded output (from nal_b sum)")
-    print("  ble snd  = BLE link sender kbps (GATT write bytes)")
-    print("  ble rcv  = BLE link receiver kbps (received bytes)")
+    print("═" * 88)
+    print("  frm%   = frame delivery rate  (RECV/SEND)")
+    print("  f_snt  = total BLE fragments sent  (VIDEO frames only)")
+    print("  f_rcv  = total BLE fragments received at receiver")
+    print("  frag%  = fragment delivery rate  (f_rcv/f_snt)")
+    print("  ble snd/rcv = BLE link kbps (GATT write / received bytes)")
+
+
+# ── bitrate ramp finder ───────────────────────────────────────────────────────
+
+# Throughput log regexes (start_tput / stop_tput path)
+TPUT_SND_RE  = re.compile(r"TPUT_SND seq=\d+ bytes=(\d+) ts_us=(\d+)")
+
+
+def _tput_kbps(log_text, re_pattern):
+    """Compute kbps from a log of (bytes, ts_us) entries."""
+    rows = [(int(m.group(1)), int(m.group(2))) for m in re_pattern.finditer(log_text)]
+    if len(rows) < 2:
+        return 0.0
+    ts = sorted(t for _, t in rows)
+    elapsed_s = (ts[-1] - ts[0]) / 1e6
+    if elapsed_s <= 0:
+        return 0.0
+    return sum(b for b, _ in rows) * 8 / elapsed_s / 1000.0
+
+
+def _ramp_step(sender, receiver, receiver_peer, target_bps, payload_bytes, dur):
+    """Run one sequential-send throughput pass at target_bps.
+
+    Passes delay_ms to start_tput so the app paces to target_bps.
+    Returns (snd_kbps, rcv_kbps, dup_factor).
+    """
+    bits_per_pkt = payload_bytes * 8
+    delay_ms     = max(0, round(bits_per_pkt * 1000 / target_bps) - 1)
+
+    adb(sender,   "shell", "logcat", "-c", timeout=5)
+    adb(receiver, "shell", "logcat", "-c", timeout=5)
+    send_log_path = "/tmp/ble_ramp_send.log"
+    recv_log_path = "/tmp/ble_ramp_recv.log"
+    sp, sf = start_logcat_stream(sender,   ["BLE_TPUT:I"], send_log_path)
+    rp, rf = start_logcat_stream(receiver, ["latency:I"],  recv_log_path)
+    time.sleep(0.2)
+
+    broadcast(sender, cmd="start_tput", peer_id=receiver_peer,
+              bytes=payload_bytes, delay_ms=delay_ms)
+    time.sleep(dur)
+    broadcast(sender, cmd="stop_tput")
+    time.sleep(1)
+
+    snd_log = stop_logcat_stream(sp, sf)
+    rcv_log = stop_logcat_stream(rp, rf)
+
+    snd = _tput_kbps(snd_log, TPUT_SND_RE)
+
+    # Receiver: RECV seq=N nal_b=N ts_us=T (handleIncomingVideo)
+    rcv_rows = [(int(m.group(2)) + 2, int(m.group(3)))
+                for m in RECV_RE.finditer(rcv_log)]
+    if len(rcv_rows) >= 2:
+        ts = sorted(t for _, t in rcv_rows)
+        elapsed_s = (ts[-1] - ts[0]) / 1e6
+        rcv = sum(b for b, _ in rcv_rows) * 8 / elapsed_s / 1000.0 if elapsed_s > 0 else 0.0
+    else:
+        rcv = 0.0
+
+    dup = max(1, round(rcv / snd)) if snd > 1.0 else 1
+    return snd, rcv / dup, dup
+
+
+def run_ramp(sender, receiver, receiver_peer, start, step, dur, threshold, payload_bytes=450):
+    """Increase target kbps by +step until rcv drops below threshold × snd,
+    then decrease by -step until stable.  Reports max sustainable bitrate.
+
+    The app sends sequentially — one packet at a time, gated on BLE write
+    completion — so snd_kbps reflects actual wire throughput, not send rate.
+    Metric: delivery% = rcv_kbps / snd_kbps.  100% = no loss.
+    """
+    print(f"\n{'═'*62}")
+    print(f"  BITRATE RAMP  payload={payload_bytes}B/pkt (sequential, no queue overflow)")
+    print(f"  start={start//1000}k  step={step//1000}k  dur={dur}s  threshold={threshold}%")
+    print(f"  snd = actual BLE write rate  |  rcv = receiver byte rate")
+    print(f"{'═'*62}\n")
+
+    def _row(arrow, target, snd, rcv, dup, ok):
+        deliv  = 100.0 * rcv / snd if snd > 0 else 0.0
+        if rcv == 0.0 and snd > 5.0:
+            status = "DISC"   # likely disconnected, not just packet loss
+        elif ok:
+            status = "OK  "
+        else:
+            status = "LOSS"
+        dup_s  = f" ×{dup}" if dup > 1 else "   "
+        print(f"  {arrow} {target//1000:>4}k  snd={snd:6.1f}  rcv={rcv:6.1f}"
+              f"  deliv={deliv:5.1f}%{dup_s}  [{status}]", flush=True)
+
+    def _reconnect_if_needed():
+        """Bring both devices to foreground and wait for BLE peer to reappear."""
+        bring_to_foreground(sender)
+        bring_to_foreground(receiver)
+        time.sleep(2)
+        peers = get_connected_peers(sender)
+        if receiver_peer not in peers:
+            print("  [ramp] receiver not seen — waiting up to 20s for BLE reconnect…",
+                  flush=True)
+            for _ in range(4):
+                time.sleep(5)
+                bring_to_foreground(sender)
+                bring_to_foreground(receiver)
+                if receiver_peer in get_connected_peers(sender):
+                    break
+            else:
+                print("  [ramp] WARNING: receiver still not connected — results may be 0")
+
+    def _between_steps():
+        time.sleep(3)
+        _reconnect_if_needed()
+
+    target    = start
+    max_ok    = 0
+    loss_at   = None
+    prev_snd  = 0.0
+
+    # ── Phase 1: ramp UP ─────────────────────────────────────────────────────
+    print("  Phase 1: increasing…")
+    while True:
+        snd, rcv, dup = _ramp_step(sender, receiver, receiver_peer,
+                                    target, payload_bytes, dur)
+        deliv = 100.0 * rcv / snd if snd > 0 else 0.0
+        ok    = deliv >= threshold
+
+        # Detect BLE hardware ceiling: snd stopped growing by more than 5%
+        at_ceiling = prev_snd > 0 and snd < prev_snd * 1.05
+
+        _row("↑", target, snd, rcv, dup, ok)
+        if at_ceiling and ok:
+            print(f"  [ramp] BLE ceiling reached at ~{snd:.0f} kbps — stopping ramp")
+            max_ok = target
+            break
+
+        if ok:
+            max_ok   = target
+            prev_snd = snd
+            target  += step
+        else:
+            loss_at = target
+            break
+
+        _between_steps()
+
+    # ── Phase 2: back off ────────────────────────────────────────────────────
+    if loss_at is not None and loss_at > start:
+        print(f"\n  Phase 2: backing off from {loss_at//1000}k…")
+        target = loss_at - step
+        while target >= start:
+            snd, rcv, dup = _ramp_step(sender, receiver, receiver_peer,
+                                        target, payload_bytes, dur)
+            deliv = 100.0 * rcv / snd if snd > 0 else 0.0
+            ok    = deliv >= threshold
+            _row("↓", target, snd, rcv, dup, ok)
+
+            if ok:
+                max_ok = target
+                break
+
+            target -= step
+            _between_steps()
+
+    print(f"\n{'═'*62}")
+    if max_ok and loss_at is None:
+        print(f"  ★  BLE ceiling: ~{max_ok//1000} kbps  (no loss; link hardware-limited)")
+    elif max_ok:
+        print(f"  ★  Max sustainable: {max_ok//1000} kbps  (loss at {loss_at//1000}k)")
+    else:
+        print(f"  ★  Loss at start bitrate ({start//1000}k) — link congested.")
+    print(f"{'═'*62}")
+    return max_ok
 
 
 # ── main ──────────────────────────────────────────────────────────────────────
@@ -320,8 +575,8 @@ def main():
     ap.add_argument("--receiver",    default=RECEIVER)
     ap.add_argument("--peer",        default=None,
                     help="Receiver peer ID hex (auto-detected if omitted)")
-    ap.add_argument("--cls",   type=int, nargs="+", default=DEFAULT_CLS,
-                    help="CL values: 0=DACE OFF, -1=auto, 1-9=fixed (default: -1 0)")
+    ap.add_argument("--cls",   type=int, nargs="+", default=None,
+                    help="CL values: 0=DACE OFF, -1=auto, 1-9=fixed (default: -1 0; skipped with --ramp)")
     ap.add_argument("--duration",    type=int, default=DEFAULT_DUR,
                     help=f"Seconds per PSNR pass (default {DEFAULT_DUR})")
     ap.add_argument("--fps",         type=int, default=DEFAULT_FPS)
@@ -337,15 +592,31 @@ def main():
                     help="Also run a dedicated throughput pass (cl=0, fps=15, bitrate=200kbps)")
     ap.add_argument("--tput-duration", type=int, default=30,
                     help="Duration of throughput pass in seconds (default 30)")
+    ap.add_argument("--ramp",        action="store_true",
+                    help="Ramp bitrate up in steps until loss, then back down to find max")
+    ap.add_argument("--ramp-start",  type=int, default=50000,
+                    help="Ramp start bitrate bps (default 50000)")
+    ap.add_argument("--ramp-step",   type=int, default=25000,
+                    help="Ramp step bps up and down (default 25000)")
+    ap.add_argument("--ramp-dur",    type=int, default=15,
+                    help="Seconds per ramp step (default 15)")
+    ap.add_argument("--ramp-threshold", type=float, default=90.0,
+                    help="rcv/snd delivery %% threshold for 'sustainable' (default 90.0)")
     args = ap.parse_args()
 
     sender   = args.sender
     receiver = args.receiver
 
+    # Resolve cls: skip PSNR passes when --ramp is given without an explicit --cls
+    cls = args.cls if args.cls is not None else ([] if args.ramp else DEFAULT_CLS)
+
     print("═" * 66)
     print(f"  BLE DACE test  sender={sender}  receiver={receiver}")
-    print(f"  CLs={args.cls}  dur={args.duration}s  fps={args.fps}  bitrate={args.bitrate}bps"
-          + ("  +throughput" if args.throughput else ""))
+    if cls:
+        print(f"  CLs={cls}  dur={args.duration}s  fps={args.fps}  bitrate={args.bitrate}bps")
+    if args.ramp:
+        print(f"  RAMP  start={args.ramp_start//1000}k  step={args.ramp_step//1000}k  "
+              f"dur={args.ramp_dur}s  threshold={args.ramp_threshold}%")
     print("═" * 66)
 
     # Push YUV file
@@ -406,7 +677,7 @@ def main():
     results   = {}
     tput_results = []
 
-    for cl in args.cls:
+    for cl in cls:
         s, send_rows, recv_rows = run_pass(
             sender, receiver, receiver_peer,
             cl, args.fps, args.bitrate, args.duration,
@@ -426,7 +697,7 @@ def main():
                         f"{r['ssim']:.4f},{r['enc_us']},{recv_ts},{lat}\n")
         print(f"  CSV → {csv_path}")
 
-        if cl != args.cls[-1]:
+        if cl != cls[-1]:
             time.sleep(5)
             bring_to_foreground(sender)
             time.sleep(3)
@@ -445,25 +716,28 @@ def main():
 
     # ── PSNR/SSIM summary table ───────────────────────────────────────────────
     if results:
-        print("\n" + "═" * 80)
+        print("\n" + "═" * 90)
         print("  PSNR/SSIM RESULTS  (ss = steady-state, skip IDR + correction frames)")
-        print("═" * 80)
-        hdr = (f"{'Mode':<18} {'SEND':>5} {'RECV':>5} {'fail':>5}  "
-               f"{'enc kbps':>9} {'ble kbps':>9} {'rcv kbps':>9}  "
+        print("═" * 90)
+        hdr = (f"{'Mode':<18} {'SEND':>5} {'RECV':>5} {'frm%':>6} {'frag%':>6}  "
+               f"{'ble kbps':>9} {'rcv kbps':>9}  "
                f"{'PSNR ss':>8} {'SSIM ss':>8}  {'enc ms':>7}")
         print(hdr)
-        print("─" * 80)
+        print("─" * 90)
 
-        for cl in args.cls:
+        for cl in cls:
             s     = results[cl]
             label = s["label"]
             psnr  = s["psnr_ss"]["avg"]
             ssim  = s["ssim_ss"]["avg"]
             enc   = s["enc_us"]["avg"] / 1000
-            fail  = s["recv_fail"]
+            frame_pct = 100.0 * s["recv"] / s["send"] if s["send"] > 0 else 0.0
+            frag_pct  = (100.0 * s["frags_recv"] / s["frags_sent"]
+                         if s.get("frags_sent", 0) > 0 else float("nan"))
+            frag_str  = f"{frag_pct:5.1f}%" if frag_pct == frag_pct else "   n/a"
             print(
-                f"{label:<18} {s['send']:>5} {s['recv']:>5} {fail:>5}  "
-                f"{s['enc_kbps']:>8.1f} {s['ble_kbps']:>9.1f} {s['recv_kbps']:>9.1f}  "
+                f"{label:<18} {s['send']:>5} {s['recv']:>5} {frame_pct:>5.1f}% {frag_str:>6}  "
+                f"{s['ble_kbps']:>9.1f} {s['recv_kbps']:>9.1f}  "
                 f"{psnr:>7.2f}dB {ssim:>8.4f}  {enc:>6.1f}ms"
             )
 
@@ -474,28 +748,37 @@ def main():
             d_ssim = on["ssim_ss"]["avg"] - off["ssim_ss"]["avg"]
             ratio  = (on["enc_us"]["avg"] / off["enc_us"]["avg"]
                       if off["enc_us"]["avg"] > 0 else float("nan"))
-            print("─" * 80)
+            print("─" * 90)
             print(f"  DACE ON vs OFF:  ΔPSNR={d_psnr:+.2f}dB  ΔSSIM={d_ssim:+.4f}"
                   f"  enc ratio={ratio:.1f}×")
-        print("═" * 80)
-        print("  enc kbps = x264 encoded bitrate (nal_b sum)  |  ble/rcv kbps = BLE link bytes")
-        print("  fail     = RECV_FAIL (decode error, not missing packet)")
+        print("═" * 90)
+        print("  frm% = frame delivery (RECV/SEND) | frag% = BLE fragment delivery")
+        print("  ble/rcv kbps = BLE link bytes | enc ms = encoder latency")
 
     # ── Throughput summary ────────────────────────────────────────────────────
     if tput_results:
         print_throughput_summary(tput_results)
 
+    # ── Bitrate ramp ─────────────────────────────────────────────────────────
+    if args.ramp:
+        time.sleep(5)
+        bring_to_foreground(sender)
+        time.sleep(3)
+        run_ramp(sender, receiver, receiver_peer,
+                 start=args.ramp_start, step=args.ramp_step,
+                 dur=args.ramp_dur, threshold=args.ramp_threshold)
+
     # Save summary txt
     summary_path = f"{args.out}_summary.txt"
     with open(summary_path, "w") as f:
         f.write(f"BLE DACE test — sender={sender} receiver={receiver}\n")
-        f.write(f"CLs={args.cls} duration={args.duration}s fps={args.fps} "
+        f.write(f"CLs={cls} duration={args.duration}s fps={args.fps} "
                 f"bitrate={args.bitrate}bps\n\n")
         if results:
             f.write(f"{'Mode':<18} {'SEND':>5} {'RECV':>5} {'fail':>5}  "
                     f"{'enc_kbps':>9} {'ble_kbps':>9} {'rcv_kbps':>9}  "
                     f"{'PSNR_ss':>8} {'SSIM_ss':>8}  {'enc_ms':>7}\n")
-            for cl in args.cls:
+            for cl in cls:
                 s = results[cl]
                 f.write(
                     f"{s['label']:<18} {s['send']:>5} {s['recv']:>5} {s['recv_fail']:>5}  "

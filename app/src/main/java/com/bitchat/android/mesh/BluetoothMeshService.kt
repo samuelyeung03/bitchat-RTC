@@ -69,6 +69,9 @@ class BluetoothMeshService(private val context: Context) {
     private var isActive = false
     private val adbReceiver = AdbBroadcastReceiver()  // dynamically registered so commands reach existing process
 
+    // Throughput test loop (start_tput / stop_tput)
+    private var tputJob: Job? = null
+
     // Delegate for message callbacks (maintains same interface)
     var delegate: BluetoothMeshDelegate? = null
 
@@ -894,6 +897,45 @@ class BluetoothMeshService(private val context: Context) {
                 Log.e(TAG, "❌ Failed to send voice ack for seq=$seq: ${e.message}")
             }
         }
+    }
+
+    /**
+     * Throughput ramp test: send packets of [payloadBytes] bytes sequentially,
+     * waiting for the BLE write permit before each send so the queue never overflows.
+     * Logs TPUT_SND bytes_sent=N ts_us=T on every packet for the test script to parse.
+     */
+    fun startTput(recipientPeerID: String, payloadBytes: Int, delayMs: Long = 0L) {
+        stopTput()
+        Log.i("BLE_TPUT", "TPUT_START peer=$recipientPeerID payload=$payloadBytes delay_ms=$delayMs")
+        tputJob = serviceScope.launch {
+            var seq = 0
+            val recipient = hexStringToByteArray(recipientPeerID)
+            while (isActive) {
+                // Build an incompressible pseudo-random payload
+                val payload = ByteArray(payloadBytes) { i -> ((i * 1664525 + 1013904223 + seq) ushr 24).toByte() }
+                val packet = BitchatPacket(
+                    version     = 1u,
+                    type        = MessageType.VIDEO.value,
+                    senderID    = hexStringToByteArray(myPeerID),
+                    recipientID = recipient,
+                    timestamp   = System.currentTimeMillis().toULong(),
+                    payload     = payload,
+                    signature   = null,
+                    ttl         = com.bitchat.android.util.AppConstants.MESSAGE_TTL_HOPS
+                )
+                val transferId = sha256Hex(payload)
+                connectionManager.sendPacketToPeer(recipientPeerID, packet, transferId = transferId)
+                Log.i("BLE_TPUT", "TPUT_SND seq=$seq bytes=${payloadBytes} ts_us=${System.currentTimeMillis() * 1000L}")
+                seq++
+                if (delayMs > 0) delay(delayMs)
+            }
+        }
+    }
+
+    fun stopTput() {
+        tputJob?.cancel()
+        tputJob = null
+        Log.i("BLE_TPUT", "TPUT_STOP")
     }
 
     /**

@@ -77,6 +77,8 @@ class RTCConnectionManager(
     private var videoCaptureJob: Job? = null
     private var videoSeqNumber: Int = 0
     private var videoFrameCount: Int = 0
+    private var bypassEncode = false
+    private var tputPayloadSize = 0
 
     // Convenience constructor that takes BluetoothMeshService and uses it to send encoded frames
     constructor(
@@ -374,6 +376,7 @@ class RTCConnectionManager(
         sourcePath: String? = null,
         sourceWidth: Int? = null,
         sourceHeight: Int? = null,
+        bypassEncode: Boolean = false,
     ) {
         val useFileSource = !sourcePath.isNullOrBlank()
 
@@ -400,13 +403,18 @@ class RTCConnectionManager(
             return
         }
 
-        videoEncoder = DACEEncoder(
-            width           = width,
-            height          = height,
-            fps             = fps,
-            bitrate         = bitrate,
-            complexityLevel = complexityLevel
-        )
+        this.bypassEncode = bypassEncode
+        this.tputPayloadSize = (bitrate / fps / 8).coerceAtLeast(64)
+
+        if (!bypassEncode) {
+            videoEncoder = DACEEncoder(
+                width           = width,
+                height          = height,
+                fps             = fps,
+                bitrate         = bitrate,
+                complexityLevel = complexityLevel
+            )
+        }
 
         videoDecoder = DACEDecoder(width, height)
 
@@ -463,36 +471,43 @@ class RTCConnectionManager(
         videoOutputDevice = null
         videoSeqNumber = 0
         videoFrameCount = 0
+        bypassEncode = false
+        tputPayloadSize = 0
         Log.i(TAG, "DACE video stopped")
     }
 
     private fun sendEncodedVideoFrame(yuv420: ByteArray, recipientId: String?) {
-        val enc = videoEncoder ?: run { Log.w(TAG, "sendEncodedVideoFrame: no encoder"); return }
         val seq = videoSeqNumber and 0xFFFF
         videoFrameCount++
 
-        val forceKey = (videoFrameCount % AppConstants.Dace.KEYFRAME_INTERVAL_FRAMES) == 1
-        Log.d(TAG, "sendEncodedVideoFrame: seq=$seq forceKey=$forceKey yuv=${yuv420.size}")
+        val nalBytes: ByteArray
+        val cl: Int; val psnr: Double; val ssim: Double; val encUs: Long
 
-        val nalBytes = enc.encode(yuv420, forceKey) ?: run {
-            Log.w(TAG, "sendEncodedVideoFrame: encode returned null for seq=$seq")
-            return
+        if (bypassEncode) {
+            // Throughput mode: send pseudo-random payload (incompressible), skip x264
+            nalBytes = ByteArray(tputPayloadSize) { i -> ((i * 1664525 + 1013904223) ushr 24).toByte() }
+            cl = 0; psnr = 0.0; ssim = 0.0; encUs = 0L
+        } else {
+            val enc = videoEncoder ?: run { Log.w(TAG, "sendEncodedVideoFrame: no encoder"); return }
+            val forceKey = (videoFrameCount % AppConstants.Dace.KEYFRAME_INTERVAL_FRAMES) == 1
+            Log.d(TAG, "sendEncodedVideoFrame: seq=$seq forceKey=$forceKey yuv=${yuv420.size}")
+            nalBytes = enc.encode(yuv420, forceKey) ?: run {
+                Log.w(TAG, "sendEncodedVideoFrame: encode returned null for seq=$seq"); return }
+            val daceEnc = enc as? DACEEncoder
+            psnr  = daceEnc?.getLastPsnrY()        ?: 0.0
+            ssim  = daceEnc?.getLastSsimY()        ?: 0.0
+            encUs = daceEnc?.getLastEncodeTimeUs() ?: 0L
+            cl    = enc.getLastComplexity()
         }
 
-        // 2-byte sequence header + NAL data
+        // 2-byte sequence header + NAL data (or dummy payload)
         val payload = ByteArray(nalBytes.size + 2)
         payload[0] = ((seq shr 8) and 0xFF).toByte()
         payload[1] = (seq and 0xFF).toByte()
         System.arraycopy(nalBytes, 0, payload, 2, nalBytes.size)
         videoSeqNumber = (seq + 1) and 0xFFFF
 
-        // Collect PSNR + SSIM + timing from DACEEncoder if available
-        val daceEnc = enc as? DACEEncoder
-        val psnr    = daceEnc?.getLastPsnrY()    ?: 0.0
-        val ssim    = daceEnc?.getLastSsimY()    ?: 0.0
-        val encUs   = daceEnc?.getLastEncodeTimeUs() ?: 0L
-        val cl      = enc.getLastComplexity()
-        val tsUs    = System.currentTimeMillis() * 1000L
+        val tsUs = System.currentTimeMillis() * 1000L
         Log.i(LATENCY_TAG, "SEND seq=$seq cl=$cl nal_b=${nalBytes.size} psnr=${"%.2f".format(psnr)} ssim=${"%.4f".format(ssim)} enc_us=$encUs ts_us=$tsUs")
 
         try {
