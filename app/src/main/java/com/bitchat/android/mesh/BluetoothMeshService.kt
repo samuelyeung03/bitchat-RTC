@@ -37,6 +37,9 @@ class BluetoothMeshService(private val context: Context) {
     companion object {
         private const val TAG = "BluetoothMeshService"
         private val MAX_TTL: UByte = com.bitchat.android.util.AppConstants.MESSAGE_TTL_HOPS
+
+        /** Singleton reference for AdbBroadcastReceiver. Set on init, cleared on stopServices(). */
+        @Volatile var instance: BluetoothMeshService? = null
     }
     
     // Core components - each handling specific responsibilities
@@ -55,7 +58,10 @@ class BluetoothMeshService(private val context: Context) {
     
     // Service state management
     private var isActive = false
-    
+
+    // Throughput test loop (start_tput / stop_tput)
+    private var tputJob: Job? = null
+
     // Delegate for message callbacks (maintains same interface)
     var delegate: BluetoothMeshDelegate? = null
     
@@ -63,6 +69,7 @@ class BluetoothMeshService(private val context: Context) {
     private val serviceScope = CoroutineScope(Dispatchers.IO + SupervisorJob())
     
     init {
+        instance = this
         setupDelegates()
         messageHandler.packetProcessor = packetProcessor
         //startPeriodicDebugLogging()
@@ -562,6 +569,8 @@ class BluetoothMeshService(private val context: Context) {
         
         Log.i(TAG, "Stopping Bluetooth mesh service")
         isActive = false
+        stopTput()
+        instance = null
         
         // Send leave announcement
         sendLeaveAnnouncement()
@@ -582,10 +591,54 @@ class BluetoothMeshService(private val context: Context) {
             serviceScope.cancel()
         }
     }
-    
+
+    // ── Convenience wrappers used by AdbBroadcastReceiver ─────────────────────
+    /** Returns map of peerID → nickname for all currently verified peers. */
+    fun getConnectedPeers(): Map<String, String> =
+        peerManager.getVerifiedPeers().mapValues { it.value.nickname }
+
+    fun stopClient()  = connectionManager.stopClient()
+    fun startClient() = connectionManager.startClient()
+
     /**
-     * Send public message
+     * Throughput ramp test: send packets of [payloadBytes] bytes sequentially,
+     * waiting for the BLE write permit before each send so the queue never overflows.
+     * Logs TPUT_SND bytes_sent=N ts_us=T on every packet for the test script to parse.
      */
+    fun startTput(recipientPeerID: String, payloadBytes: Int, delayMs: Long = 0L) {
+        stopTput()
+        Log.i("BLE_TPUT", "TPUT_START peer=$recipientPeerID payload=$payloadBytes delay_ms=$delayMs")
+        tputJob = serviceScope.launch {
+            var seq = 0
+            val recipient = hexStringToByteArray(recipientPeerID)
+            while (isActive) {
+                // Build an incompressible pseudo-random payload
+                val payload = ByteArray(payloadBytes) { i -> ((i * 1664525 + 1013904223 + seq) ushr 24).toByte() }
+                val packet = BitchatPacket(
+                    version     = 1u,
+                    type        = MessageType.VIDEO.value,
+                    senderID    = hexStringToByteArray(myPeerID),
+                    recipientID = recipient,
+                    timestamp   = System.currentTimeMillis().toULong(),
+                    payload     = payload,
+                    signature   = null,
+                    ttl         = com.bitchat.android.util.AppConstants.MESSAGE_TTL_HOPS
+                )
+                val transferId = sha256Hex(payload)
+                connectionManager.sendPacketToPeer(recipientPeerID, packet)
+                Log.i("BLE_TPUT", "TPUT_SND seq=$seq bytes=${payloadBytes} ts_us=${System.currentTimeMillis() * 1000L}")
+                seq++
+                if (delayMs > 0) delay(delayMs)
+            }
+        }
+    }
+
+    fun stopTput() {
+        tputJob?.cancel()
+        tputJob = null
+        Log.i("BLE_TPUT", "TPUT_STOP")
+    }
+    // ──────────────────────────────────────────────────────────────────────────
     fun sendMessage(content: String, mentions: List<String> = emptyList(), channel: String? = null) {
         if (content.isEmpty()) return
         
