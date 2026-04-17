@@ -15,6 +15,8 @@ import com.bitchat.android.sync.GossipSyncManager
 import com.bitchat.android.util.toHexString
 import kotlinx.coroutines.*
 import java.util.*
+import android.content.IntentFilter
+import com.bitchat.android.AdbBroadcastReceiver
 import kotlin.math.sign
 import kotlin.random.Random
 
@@ -62,6 +64,9 @@ class BluetoothMeshService(private val context: Context) {
     // Throughput test loop (start_tput / stop_tput)
     private var tputJob: Job? = null
 
+    // ADB broadcast receiver (registered on init, unregistered on stopServices)
+    private val adbReceiver = AdbBroadcastReceiver()
+
     // Delegate for message callbacks (maintains same interface)
     var delegate: BluetoothMeshDelegate? = null
     
@@ -70,6 +75,7 @@ class BluetoothMeshService(private val context: Context) {
     
     init {
         instance = this
+        context.registerReceiver(adbReceiver, IntentFilter(AdbBroadcastReceiver.ACTION))
         setupDelegates()
         messageHandler.packetProcessor = packetProcessor
         //startPeriodicDebugLogging()
@@ -570,6 +576,7 @@ class BluetoothMeshService(private val context: Context) {
         Log.i(TAG, "Stopping Bluetooth mesh service")
         isActive = false
         stopTput()
+        try { context.unregisterReceiver(adbReceiver) } catch (_: Exception) {}
         instance = null
         
         // Send leave announcement
