@@ -32,7 +32,7 @@ import sys
 import time
 
 # ── defaults ──────────────────────────────────────────────────────────────────
-SENDER        = "dc1c0ad"
+SENDER        = "T1AIOC656909KGK"
 RECEIVER      = "8e27af28"
 RECEIVER_PEER = "fea25dd05ccc26a6"
 PACKAGE       = "com.bitchat.droid"
@@ -159,7 +159,7 @@ def _kbps_from_rows(rows):
 # ── ramp step ─────────────────────────────────────────────────────────────────
 
 def _ramp_step(sender, receiver, receiver_peer, target_bps, payload_bytes, dur):
-    """Send for dur seconds at target_bps; return (snd_kbps, rcv_kbps, dup_factor).
+    """Send for dur seconds at target_bps; return (snd_kbps, rcv_kbps, dup_factor, snd_pkts, rcv_pkts).
 
     rcv_kbps may be 0 on old builds that lack handleIncomingVideo logging.
     Ceiling detection uses snd_kbps plateau regardless of rcv.
@@ -185,34 +185,41 @@ def _ramp_step(sender, receiver, receiver_peer, target_bps, payload_bytes, dur):
     snd_rows = [(int(m.group(1)), int(m.group(2))) for m in TPUT_SND_RE.finditer(snd_log)]
     rcv_rows = [(int(m.group(2)) + 2, int(m.group(3))) for m in RECV_RE.finditer(rcv_log)]
 
+    snd_pkts = len(snd_rows)
+    rcv_pkts = len(rcv_rows)
+
     snd = _kbps_from_rows(snd_rows)
     rcv = _kbps_from_rows(rcv_rows)
 
     # Correct for duplicate connections (rcv ≈ 2× snd)
     dup = max(1, round(rcv / snd)) if snd > 1.0 and rcv > 0 else 1
-    return snd, rcv / dup, dup
+    return snd, rcv / dup, dup, snd_pkts, rcv_pkts
 
 
 # ── ramp ──────────────────────────────────────────────────────────────────────
 
 def run_ramp(sender, receiver, receiver_peer, start, step, dur, threshold,
-             payload_bytes=450):
+             payload_bytes=450, min_step_bps=500):
     """Ramp bitrate up until ceiling or loss; back off if loss detected."""
     print(f"\n{'═'*62}")
     print(f"  BITRATE RAMP  payload={payload_bytes}B/pkt (sequential)")
-    print(f"  start={start//1000}k  step={step//1000}k  dur={dur}s  threshold={threshold}%")
+    print(
+        f"  start={start//1000}k  step={step//1000}k  min_step={min_step_bps/1000:.1f}k"
+        f"  dur={dur}s  threshold={threshold}%"
+    )
     print(f"  snd = BLE write rate  |  rcv = receiver rate (0 = old build, using snd/target)")
     print(f"{'═'*62}\n")
 
-    def _row(arrow, target, snd, rcv, dup, ok, deliv):
+    def _row(arrow, target, snd, rcv, dup, ok, deliv, snd_pkts, rcv_pkts):
         if rcv > 0:
             deliv_str = f"{deliv:5.1f}%(rcv)"
         else:
             deliv_str = f"{deliv:5.1f}%(snd)"
         status = "OK  " if ok else "LOSS"
         dup_s = f" ×{dup}" if dup > 1 else "   "
+        pkt_deliv = f"{rcv_pkts}/{snd_pkts}pkts({100*rcv_pkts/snd_pkts:.0f}%)" if snd_pkts > 0 else "0/0pkts"
         print(f"  {arrow} {target//1000:>4}k  snd={snd:6.1f}  rcv={rcv:6.1f}"
-              f"  deliv={deliv_str}{dup_s}  [{status}]", flush=True)
+              f"  deliv={deliv_str}{dup_s}  {pkt_deliv}  [{status}]", flush=True)
 
     def _reconnect_if_needed():
         bring_to_foreground(sender)
@@ -242,7 +249,7 @@ def run_ramp(sender, receiver, receiver_peer, start, step, dur, threshold,
     # ── Phase 1: ramp UP ─────────────────────────────────────────────────────
     print("  Phase 1: increasing…")
     while True:
-        snd, rcv, dup = _ramp_step(sender, receiver, receiver_peer,
+        snd, rcv, dup, snd_pkts, rcv_pkts = _ramp_step(sender, receiver, receiver_peer,
                                     target, payload_bytes, dur)
         # delivery%: use rcv/snd when available; fall back to snd/target when rcv=0
         # (old builds don't log RECV, so rcv=0 — use sender-side wire rate as proxy)
@@ -253,7 +260,7 @@ def run_ramp(sender, receiver, receiver_peer, start, step, dur, threshold,
         ok         = deliv >= threshold
         at_ceiling = prev_snd > 0 and snd < prev_snd * 1.05
 
-        _row("↑", target, snd, rcv, dup, ok, deliv)
+        _row("↑", target, snd, rcv, dup, ok, deliv, snd_pkts, rcv_pkts)
 
         if at_ceiling and ok:
             print(f"  [ramp] BLE ceiling ~{snd:.0f} kbps — stopping")
@@ -271,23 +278,67 @@ def run_ramp(sender, receiver, receiver_peer, start, step, dur, threshold,
         _between()
 
     # ── Phase 2: back off ────────────────────────────────────────────────────
-    if loss_at is not None and loss_at > start:
-        print(f"\n  Phase 2: backing off from {loss_at//1000}k…")
-        target = loss_at - step
-        while target >= start:
-            snd, rcv, dup = _ramp_step(sender, receiver, receiver_peer,
-                                        target, payload_bytes, dur)
-            deliv = (100.0 * rcv / snd if rcv > 0 and snd > 0 else
-                     100.0 * snd / (target / 1000) if target > 0 and snd > 0 else 0.0)
-            ok    = deliv >= threshold
-            _row("↓", target, snd, rcv, dup, ok, deliv)
+    if loss_at is not None:
+        print(
+            f"\n  Phase 2: backing off from {loss_at//1000}k"
+            f" (step halves to {min_step_bps/1000:.1f}k)…"
+        )
+        high = loss_at  # Known bad bitrate.
+        low = max_ok if max_ok > 0 else None  # Known good bitrate (if any).
 
-            if ok:
-                max_ok = target
-                break
+        # If loss happened at the first step, probe downward until we find an OK point.
+        if low is None:
+            probe_step = max(step, min_step_bps)
+            while True:
+                target = max(min_step_bps, high - probe_step)
+                if target >= high:
+                    break
 
-            target -= step
-            _between()
+                snd, rcv, dup, snd_pkts, rcv_pkts = _ramp_step(sender, receiver, receiver_peer,
+                                           target, payload_bytes, dur)
+                deliv = (100.0 * rcv / snd if rcv > 0 and snd > 0 else
+                         100.0 * snd / (target / 1000) if target > 0 and snd > 0 else 0.0)
+                ok    = deliv >= threshold
+                _row("↓", target, snd, rcv, dup, ok, deliv, snd_pkts, rcv_pkts)
+
+                if ok:
+                    low = target
+                    max_ok = target
+                    break
+
+                high = target
+                if high <= min_step_bps and probe_step <= min_step_bps:
+                    break
+                if probe_step > min_step_bps:
+                    probe_step = max(min_step_bps, probe_step // 2)
+                _between()
+
+        if low is not None and high - low > min_step_bps:
+            backoff_step = max((high - low) // 2, min_step_bps)
+            while high - low > min_step_bps:
+                target = low + backoff_step
+                target = min(target, high - min_step_bps)
+                if target <= low:
+                    break
+
+                snd, rcv, dup, snd_pkts, rcv_pkts = _ramp_step(sender, receiver, receiver_peer,
+                                           target, payload_bytes, dur)
+                deliv = (100.0 * rcv / snd if rcv > 0 and snd > 0 else
+                         100.0 * snd / (target / 1000) if target > 0 and snd > 0 else 0.0)
+                ok    = deliv >= threshold
+                _row("↓", target, snd, rcv, dup, ok, deliv, snd_pkts, rcv_pkts)
+
+                if ok:
+                    low = target
+                    max_ok = target
+                else:
+                    high = target
+
+                if high - low <= min_step_bps:
+                    break
+                if backoff_step > min_step_bps:
+                    backoff_step = max(min_step_bps, backoff_step // 2)
+                _between()
 
     print(f"\n{'═'*62}")
     if max_ok and loss_at is None:
@@ -318,10 +369,17 @@ def main():
                     help="Delivery %% threshold for 'OK' (default 90.0)")
     ap.add_argument("--payload",   type=int, default=450,
                     help="Packet payload bytes (default 450)")
+    ap.add_argument("--min_step",  type=float, default=0.5,
+                    help="Minimum backoff step in kbps (default 0.5)")
     args = ap.parse_args()
+
+    if args.min_step <= 0:
+        print("ERROR: --min_step must be > 0", file=sys.stderr)
+        sys.exit(2)
 
     sender   = args.sender
     receiver = args.receiver
+    min_step_bps = max(1, int(round(args.min_step * 1000)))
 
     print("═" * 62)
     print(f"  BLE throughput ramp  sender={sender}  receiver={receiver}")
@@ -371,7 +429,8 @@ def main():
     run_ramp(sender, receiver, receiver_peer,
              start=args.start, step=args.step,
              dur=args.dur, threshold=args.threshold,
-             payload_bytes=args.payload)
+             payload_bytes=args.payload,
+             min_step_bps=min_step_bps)
 
 
 if __name__ == "__main__":
