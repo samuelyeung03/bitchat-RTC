@@ -25,6 +25,8 @@ Devices (defaults):
 """
 
 import argparse
+import csv
+import os
 import re
 import statistics
 import subprocess
@@ -57,7 +59,10 @@ def broadcast(serial, **extras):
         elif k == "delay_ms":
             cmd += ["--el", k, str(v)]
         elif isinstance(v, int):
-            cmd += ["--ei", k, str(v)]
+            if v < 0:
+                cmd += ["--el", k, str(v)]
+            else:
+                cmd += ["--ei", k, str(v)]
         else:
             cmd += ["--es", k, str(v)]
     adb(serial, *cmd, capture=False, timeout=10)
@@ -183,7 +188,7 @@ def _ramp_step(sender, receiver, receiver_peer, target_bps, payload_bytes, dur):
     rcv_log = stop_logcat_stream(rp, rf)
 
     snd_rows = [(int(m.group(1)), int(m.group(2))) for m in TPUT_SND_RE.finditer(snd_log)]
-    rcv_rows = [(int(m.group(2)) + 2, int(m.group(3))) for m in RECV_RE.finditer(rcv_log)]
+    rcv_rows = [(int(m.group(2)), int(m.group(3))) for m in RECV_RE.finditer(rcv_log)]
 
     snd_pkts = len(snd_rows)
     rcv_pkts = len(rcv_rows)
@@ -193,162 +198,112 @@ def _ramp_step(sender, receiver, receiver_peer, target_bps, payload_bytes, dur):
 
     # Correct for duplicate connections (rcv ≈ 2× snd)
     dup = max(1, round(rcv / snd)) if snd > 1.0 and rcv > 0 else 1
-    return snd, rcv / dup, dup, snd_pkts, rcv_pkts
+    rcv_pkts_corrected = rcv_pkts // dup
+    return snd, rcv / dup, dup, snd_pkts, rcv_pkts_corrected
 
 
 # ── ramp ──────────────────────────────────────────────────────────────────────
 
-def run_ramp(sender, receiver, receiver_peer, start, step, dur, threshold,
-             payload_bytes=450, min_step_bps=500):
-    """Ramp bitrate up until ceiling or loss; back off if loss detected."""
+# ── ramp ──────────────────────────────────────────────────────────────────────
+
+def run_ramp(sender, receiver, receiver_peer, start, dur, threshold,
+             payload_bytes=450, min_step_bps=500, out_csv=None):
+    """Slow-start (exponential doubling) to find ceiling, then binary search to pin it."""
     print(f"\n{'═'*62}")
     print(f"  BITRATE RAMP  payload={payload_bytes}B/pkt (sequential)")
-    print(
-        f"  start={start//1000}k  step={step//1000}k  min_step={min_step_bps/1000:.1f}k"
-        f"  dur={dur}s  threshold={threshold}%"
-    )
-    print(f"  snd = BLE write rate  |  rcv = receiver rate (0 = old build, using snd/target)")
+    print(f"  start={start//1000}k  dur={dur}s  threshold={threshold}%")
+    print(f"  Phase 1: exponential doubling  |  Phase 2: binary search")
     print(f"{'═'*62}\n")
 
+    csv_rows = []
+
     def _row(arrow, target, snd, rcv, dup, ok, deliv, snd_pkts, rcv_pkts):
-        if rcv > 0:
-            deliv_str = f"{deliv:5.1f}%(rcv)"
-        else:
-            deliv_str = f"{deliv:5.1f}%(snd)"
+        csv_rows.append({
+            "direction":    arrow,
+            "target_kbps":  target // 1000,
+            "snd_kbps":     round(snd, 2),
+            "rcv_kbps":     round(rcv, 2),
+            "delivery_pct": round(deliv, 1),
+            "snd_pkts":     snd_pkts,
+            "rcv_pkts":     rcv_pkts,
+        })
+        deliv_str = f"{deliv:5.1f}%({'rcv' if rcv > 0 else 'snd'})"
         status = "OK  " if ok else "LOSS"
         dup_s = f" ×{dup}" if dup > 1 else "   "
-        pkt_deliv = f"{rcv_pkts}/{snd_pkts}pkts({100*rcv_pkts/snd_pkts:.0f}%)" if snd_pkts > 0 else "0/0pkts"
+        pkt_str = f"{rcv_pkts}/{snd_pkts}pkts({100*rcv_pkts/snd_pkts:.0f}%)" if snd_pkts > 0 else "0/0pkts"
         print(f"  {arrow} {target//1000:>4}k  snd={snd:6.1f}  rcv={rcv:6.1f}"
-              f"  deliv={deliv_str}{dup_s}  {pkt_deliv}  [{status}]", flush=True)
+              f"  deliv={deliv_str}{dup_s}  {pkt_str}  [{status}]", flush=True)
 
-    def _reconnect_if_needed():
+    def _measure(target):
+        snd, rcv, dup, snd_pkts, rcv_pkts = _ramp_step(
+            sender, receiver, receiver_peer, target, payload_bytes, dur)
+        if rcv_pkts > 0 and snd_pkts > 0:
+            deliv = 100.0 * rcv_pkts / snd_pkts
+        elif rcv > 0 and snd > 0:
+            deliv = 100.0 * rcv / snd
+        else:
+            deliv = 100.0 * snd / (target / 1000) if target > 0 else 0.0
+        ok = deliv >= threshold
+        return snd, rcv, dup, snd_pkts, rcv_pkts, deliv, ok
+
+    def _between():
+        time.sleep(2)
         bring_to_foreground(sender)
         bring_to_foreground(receiver)
-        time.sleep(2)
+        time.sleep(1)
         peers = get_connected_peers(sender)
         if receiver_peer not in peers:
-            print("  [ramp] receiver not seen — waiting up to 20s…", flush=True)
+            print("  [ramp] waiting for reconnect…", flush=True)
             for _ in range(4):
                 time.sleep(5)
                 bring_to_foreground(sender)
-                bring_to_foreground(receiver)
                 if receiver_peer in get_connected_peers(sender):
                     break
-            else:
-                print("  [ramp] WARNING: receiver still not connected")
 
-    def _between():
-        time.sleep(3)
-        _reconnect_if_needed()
-
-    target   = start
-    max_ok   = 0
-    loss_at  = None
-    prev_snd = 0.0
-
-    # ── Phase 1: ramp UP ─────────────────────────────────────────────────────
-    print("  Phase 1: increasing…")
+    # ── Phase 1: exponential doubling ────────────────────────────────────────
+    print("  Phase 1: exponential doubling…")
+    low  = 0
+    high = None
+    target = start
     while True:
-        snd, rcv, dup, snd_pkts, rcv_pkts = _ramp_step(sender, receiver, receiver_peer,
-                                    target, payload_bytes, dur)
-        # delivery%: use rcv/snd when available; fall back to snd/target when rcv=0
-        # (old builds don't log RECV, so rcv=0 — use sender-side wire rate as proxy)
-        if rcv > 0:
-            deliv = 100.0 * rcv / snd if snd > 0 else 0.0
-        else:
-            deliv = 100.0 * snd / (target / 1000) if target > 0 else 0.0
-        ok         = deliv >= threshold
-        at_ceiling = prev_snd > 0 and snd < prev_snd * 1.05
-
+        snd, rcv, dup, snd_pkts, rcv_pkts, deliv, ok = _measure(target)
         _row("↑", target, snd, rcv, dup, ok, deliv, snd_pkts, rcv_pkts)
-
-        if at_ceiling and ok:
-            print(f"  [ramp] BLE ceiling ~{snd:.0f} kbps — stopping")
-            max_ok = target
-            break
-
         if ok:
-            max_ok   = target
-            prev_snd = snd
-            target  += step
+            low = target
+            target *= 2
         else:
-            loss_at = target
+            high = target
             break
-
         _between()
 
-    # ── Phase 2: back off ────────────────────────────────────────────────────
-    if loss_at is not None:
-        print(
-            f"\n  Phase 2: backing off from {loss_at//1000}k"
-            f" (step halves to {min_step_bps/1000:.1f}k)…"
-        )
-        high = loss_at  # Known bad bitrate.
-        low = max_ok if max_ok > 0 else None  # Known good bitrate (if any).
-
-        # If loss happened at the first step, probe downward until we find an OK point.
-        if low is None:
-            probe_step = max(step, min_step_bps)
-            while True:
-                target = max(min_step_bps, high - probe_step)
-                if target >= high:
-                    break
-
-                snd, rcv, dup, snd_pkts, rcv_pkts = _ramp_step(sender, receiver, receiver_peer,
-                                           target, payload_bytes, dur)
-                deliv = (100.0 * rcv / snd if rcv > 0 and snd > 0 else
-                         100.0 * snd / (target / 1000) if target > 0 and snd > 0 else 0.0)
-                ok    = deliv >= threshold
-                _row("↓", target, snd, rcv, dup, ok, deliv, snd_pkts, rcv_pkts)
-
-                if ok:
-                    low = target
-                    max_ok = target
-                    break
-
-                high = target
-                if high <= min_step_bps and probe_step <= min_step_bps:
-                    break
-                if probe_step > min_step_bps:
-                    probe_step = max(min_step_bps, probe_step // 2)
-                _between()
-
-        if low is not None and high - low > min_step_bps:
-            backoff_step = max((high - low) // 2, min_step_bps)
-            while high - low > min_step_bps:
-                target = low + backoff_step
-                target = min(target, high - min_step_bps)
-                if target <= low:
-                    break
-
-                snd, rcv, dup, snd_pkts, rcv_pkts = _ramp_step(sender, receiver, receiver_peer,
-                                           target, payload_bytes, dur)
-                deliv = (100.0 * rcv / snd if rcv > 0 and snd > 0 else
-                         100.0 * snd / (target / 1000) if target > 0 and snd > 0 else 0.0)
-                ok    = deliv >= threshold
-                _row("↓", target, snd, rcv, dup, ok, deliv, snd_pkts, rcv_pkts)
-
-                if ok:
-                    low = target
-                    max_ok = target
-                else:
-                    high = target
-
-                if high - low <= min_step_bps:
-                    break
-                if backoff_step > min_step_bps:
-                    backoff_step = max(min_step_bps, backoff_step // 2)
-                _between()
+    # ── Phase 2: binary search ────────────────────────────────────────────────
+    print(f"\n  Phase 2: binary search [{low//1000}k … {high//1000}k]…")
+    while high - low > min_step_bps:
+        target = (low + high) // 2
+        snd, rcv, dup, snd_pkts, rcv_pkts, deliv, ok = _measure(target)
+        _row("→", target, snd, rcv, dup, ok, deliv, snd_pkts, rcv_pkts)
+        if ok:
+            low = target
+        else:
+            high = target
+        if high - low <= min_step_bps:
+            break
+        _between()
 
     print(f"\n{'═'*62}")
-    if max_ok and loss_at is None:
-        print(f"  ★  BLE ceiling: ~{max_ok//1000} kbps  (no loss; hardware-limited)")
-    elif max_ok:
-        print(f"  ★  Max sustainable: {max_ok//1000} kbps  (loss at {loss_at//1000}k)")
-    else:
-        print(f"  ★  Loss at start bitrate ({start//1000}k) — link congested.")
+    print(f"  ★  Max sustainable: ~{low//1000} kbps  (loss at {high//1000}k)")
     print(f"{'═'*62}")
-    return max_ok
+
+    if out_csv and csv_rows:
+        os.makedirs(os.path.dirname(os.path.abspath(out_csv)), exist_ok=True)
+        with open(out_csv, "w", newline="") as f:
+            w = csv.DictWriter(f, fieldnames=csv_rows[0].keys())
+            w.writeheader()
+            w.writerows(csv_rows)
+        print(f"  CSV → {out_csv}")
+
+    return low
+
 
 
 # ── main ──────────────────────────────────────────────────────────────────────
@@ -361,8 +316,6 @@ def main():
                     help="Receiver peer ID hex (auto-detected if omitted)")
     ap.add_argument("--start",     type=int, default=50000,
                     help="Start bitrate bps (default 50000)")
-    ap.add_argument("--step",      type=int, default=50000,
-                    help="Step bps (default 50000)")
     ap.add_argument("--dur",       type=int, default=15,
                     help="Seconds per step (default 15)")
     ap.add_argument("--threshold", type=float, default=90.0,
@@ -370,7 +323,9 @@ def main():
     ap.add_argument("--payload",   type=int, default=450,
                     help="Packet payload bytes (default 450)")
     ap.add_argument("--min_step",  type=float, default=0.5,
-                    help="Minimum backoff step in kbps (default 0.5)")
+                    help="Binary search resolution in kbps (default 0.5)")
+    ap.add_argument("--out",       default=None,
+                    help="Path to save CSV results (e.g. results/data/tput_run.csv)")
     args = ap.parse_args()
 
     if args.min_step <= 0:
@@ -427,10 +382,11 @@ def main():
         time.sleep(15)
 
     run_ramp(sender, receiver, receiver_peer,
-             start=args.start, step=args.step,
+             start=args.start,
              dur=args.dur, threshold=args.threshold,
              payload_bytes=args.payload,
-             min_step_bps=min_step_bps)
+             min_step_bps=min_step_bps,
+             out_csv=args.out)
 
 
 if __name__ == "__main__":

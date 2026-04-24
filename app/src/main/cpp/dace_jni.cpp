@@ -1,4 +1,5 @@
 #include <jni.h>
+#define DACE_TEST 1
 #include <x264.h>
 #include <cstdlib>
 #include <cstring>
@@ -19,9 +20,10 @@ struct DaceEncoderCtx {
     x264_param_t  param;
     int           width;
     int           height;
-    double        last_psnr_y;    // luma PSNR from last encode
-    double        last_ssim_y;    // luma SSIM from last encode (0–1)
-    int64_t       last_encode_us; // wall-clock duration of last x264_encoder_encode (µs)
+    double        last_psnr_y;       // luma PSNR from last encode
+    double        last_ssim_y;       // luma SSIM from last encode (0–1)
+    int64_t       last_encode_us;    // wall-clock duration of last x264_encoder_encode (µs)
+    int           last_dace_complexity; // actual DACE complexity chosen for last frame
 };
 
 // ---------------------------------------------------------------------------
@@ -50,12 +52,13 @@ Java_com_bitchat_android_rtc_DACEWrapper_nativeCreateEncoder(
     ctx->param.i_fps_num  = (uint32_t)fps;
     ctx->param.i_fps_den  = 1;
 
-    // Rate control: ABR, peak cap = bitrate, no VBV buffer delay (real-time).
-    // Matches reference: i_vbv_max_bitrate=br, i_vbv_buffer_size=0
+    // Rate control: ABR with 3-frame VBV buffer.
+    // Prevents per-frame bitrate spikes that overflow BLE fragments,
+    // while giving enough headroom for scene complexity variation.
     ctx->param.rc.i_rc_method       = X264_RC_ABR;
-    ctx->param.rc.i_bitrate         = bitrate / 1000;    // x264 expects kbps
-    ctx->param.rc.i_vbv_max_bitrate = bitrate / 1000;    // cap peak at target
-    ctx->param.rc.i_vbv_buffer_size = 0;                 // no VBV delay
+    ctx->param.rc.i_bitrate         = bitrate / 1000;
+    ctx->param.rc.i_vbv_max_bitrate = bitrate / 1000;
+    ctx->param.rc.i_vbv_buffer_size = 3 * bitrate / 1000 / fps;  // 3-frame buffer
     ctx->param.rc.i_aq_mode         = 1;                 // adaptive quantisation
 
     // Zero-latency flags (matches reference config)
@@ -65,7 +68,7 @@ Java_com_bitchat_android_rtc_DACEWrapper_nativeCreateEncoder(
     ctx->param.b_sliced_threads = 1;
     ctx->param.b_vfr_input      = 0;
     ctx->param.rc.b_mb_tree     = 0;
-    ctx->param.b_repeat_headers = 1;  // SPS/PPS in every IDR
+    ctx->param.i_keyint_max = 1500;  // matches libtest reference; let x264 decide IDR on scene change
     ctx->param.b_annexb         = 1;
     ctx->param.i_lookahead_threads = 0;
 
@@ -157,10 +160,14 @@ Java_com_bitchat_android_rtc_DACEWrapper_nativeEncodeFrame(
     env->ReleaseByteArrayElements(yuv420, yuvData, 0);
 
     if (frameSize > 0 && nalCount > 0) {
-        ctx->last_psnr_y    = (double)picOut.prop.f_psnr[0];   // Y-plane PSNR
-        ctx->last_ssim_y    = (double)picOut.prop.f_ssim;       // luma SSIM (scalar)
-        ctx->last_encode_us = (int64_t)(t1.tv_sec  - t0.tv_sec)  * 1000000LL
-                            + (int64_t)(t1.tv_nsec - t0.tv_nsec) / 1000LL;
+        ctx->last_psnr_y          = (double)picOut.prop.f_psnr[0];
+        ctx->last_ssim_y          = (double)picOut.prop.f_ssim;
+        ctx->last_encode_us       = (int64_t)(t1.tv_sec  - t0.tv_sec)  * 1000000LL
+                                  + (int64_t)(t1.tv_nsec - t0.tv_nsec) / 1000LL;
+        ctx->last_dace_complexity = (int)picOut.prop.DACE_complexity;
+        LOGI("frame encoded: dace_complexity=%d enc_time=%d enc_us=%lld",
+             ctx->last_dace_complexity, picOut.prop.DACE_encoding_time,
+             (long long)ctx->last_encode_us);
     }
 
     if (frameSize < 0) {
@@ -212,11 +219,8 @@ Java_com_bitchat_android_rtc_DACEWrapper_nativeGetLastComplexity(
         JNIEnv* /*env*/, jclass /*cls*/, jlong handle)
 {
     if (!handle) return -1;
-    // DACE_complexity is reported via x264_image_properties_t; we return
-    // the configured complexity level as a proxy until a full stats path
-    // is wired through.
     auto* ctx = reinterpret_cast<DaceEncoderCtx*>(handle);
-    return ctx->param.dace_complexity_level;
+    return ctx->last_dace_complexity;
 }
 
 // ---------------------------------------------------------------------------

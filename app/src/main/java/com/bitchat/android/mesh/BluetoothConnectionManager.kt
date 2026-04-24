@@ -78,9 +78,11 @@ class BluetoothConnectionManager(
 
     init {
         // Wire per-device write flow control after clientManager is initialized.
-        packetBroadcaster.setClientWriteAwaiter { addr -> clientManager.awaitWritePermit(addr) }
-        // Wire per-device notification flow control through server manager.
-        packetBroadcaster.setServerNotifyAwaiter { addr -> serverManager.awaitNotifyPermit(addr) }
+        // Skip when BlindSend.ENABLED — awaiters stay null, fragments sent without waiting.
+        if (!com.bitchat.android.util.AppConstants.BlindSend.ENABLED) {
+            packetBroadcaster.setClientWriteAwaiter { addr -> clientManager.awaitWritePermit(addr) }
+            packetBroadcaster.setServerNotifyAwaiter { addr -> serverManager.awaitNotifyPermit(addr) }
+        }
     }
 
     // Service state

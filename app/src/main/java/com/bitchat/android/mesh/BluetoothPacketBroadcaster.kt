@@ -279,8 +279,6 @@ class BluetoothPacketBroadcaster(
                             try { awaiter(clientConn.device.address) } catch (_: Exception) {}
                         }
                         sendDataToPeer(fragData, targetPeerID, gattServer, characteristic, isVideo)
-                        // For video: awaitWritePermit already paces via write callback — no extra delay.
-                        // For non-video: keep 20ms delay to preserve existing behaviour.
                         if (!isVideo) delay(20L)
                         if (transferId != null) {
                             sent++

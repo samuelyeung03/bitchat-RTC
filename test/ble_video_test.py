@@ -48,6 +48,36 @@ CMD_ACTION      = "com.bitchat.droid.CMD"
 
 # ── helpers ───────────────────────────────────────────────────────────────────
 
+def get_clock_offset(sender, receiver):
+    """Measure clock offset: receiver_clock - sender_clock (microseconds).
+    Uses Android's SystemClock.elapsedRealtimeNanos via logcat timestamp trick:
+    inject a known event on each device and compare the host-observed wall time
+    against the device's own millisecond clock read via `date +%s%3N`.
+    Falls back to 0 if either device doesn't support ms timestamps.
+    """
+    samples = []
+    for _ in range(5):
+        try:
+            t0_us = time.time() * 1e6
+            s_ms  = int(adb(sender,   "shell", "date +%s%3N", timeout=5).strip())
+            t1_us = time.time() * 1e6
+            r_ms  = int(adb(receiver, "shell", "date +%s%3N", timeout=5).strip())
+            t2_us = time.time() * 1e6
+            # Correct sender reading to midpoint of its round-trip
+            s_us = s_ms * 1000 + (t1_us - t0_us) / 2
+            r_us = r_ms * 1000
+            samples.append(r_us - s_us)
+        except (ValueError, RuntimeError):
+            pass
+        time.sleep(0.1)
+    if not samples:
+        print("  [warn] clock offset measurement failed, using 0")
+        return 0
+    # Median to reject outliers
+    samples.sort()
+    return samples[len(samples) // 2]
+
+
 def adb(serial, *args, check=False, capture=True, timeout=15):
     cmd = ["adb", "-s", serial] + list(args)
     r = subprocess.run(cmd, capture_output=capture, text=True, timeout=timeout)
@@ -64,7 +94,11 @@ def broadcast(serial, **extras):
         elif k == "delay_ms":
             cmd += ["--el", k, str(v)]
         elif isinstance(v, int):
-            cmd += ["--ei", k, str(v)]
+            if v < 0:
+                # Android am broadcast drops negative --ei values; use --el (long) instead
+                cmd += ["--el", k, str(v)]
+            else:
+                cmd += ["--ei", k, str(v)]
         else:
             cmd += ["--es", k, str(v)]
     adb(serial, *cmd, capture=False, timeout=10)
@@ -148,30 +182,70 @@ def stop_logcat_stream(proc, fh):
 
 # ── log patterns ──────────────────────────────────────────────────────────────
 
+# Host-stamped logcat prefix: "MM-DD HH:MM:SS.mmm"
+HOST_TS_RE = re.compile(r"^(\d{2}-\d{2} \d{2}:\d{2}:\d{2}\.\d{3})", re.MULTILINE)
+
 SEND_RE = re.compile(
+    r"^(\d{2}-\d{2} \d{2}:\d{2}:\d{2}\.\d{3}).*?"
     r"SEND seq=(\d+) cl=(-?\d+) nal_b=(\d+) psnr=([\d.]+) ssim=([\d.]+) "
-    r"enc_us=(\d+) ts_us=(\d+)"
+    r"enc_us=(\d+) ts_us=(\d+)",
+    re.MULTILINE
 )
-RECV_RE       = re.compile(r"RECV seq=(\d+) nal_b=(\d+) ts_us=(\d+)")
-RECV_FAIL_RE  = re.compile(r"RECV_FAIL seq=(\d+) nal_b=(\d+) ts_us=(\d+)")
-TPUT_RECV_RE  = re.compile(r"RECV_TPUT nal_b=(\d+) ts_us=(\d+)")
-BLE_TPUT_RE   = re.compile(r"kbps=([\d.]+)")
-FRAG_SEND_RE  = re.compile(r"FRAG_SEND total=(\d+) size=(\d+)")
-FRAG_RECV_RE  = re.compile(r"FRAG_RECV idx=(\d+) total=(\d+)")
-FRAG_DONE_RE  = re.compile(r"FRAG_DONE total=(\d+)")
+SEND_QUEUE_RE = re.compile(
+    r"^(\d{2}-\d{2} \d{2}:\d{2}:\d{2}\.\d{3}).*?SEND_QUEUE seq=(\d+) ts_us=(\d+)",
+    re.MULTILINE
+)
+SEND_WIRE_RE  = re.compile(
+    r"^(\d{2}-\d{2} \d{2}:\d{2}:\d{2}\.\d{3}).*?SEND_WIRE seq=(\d+) ts_us=(\d+)",
+    re.MULTILINE
+)
+RECV_RE      = re.compile(
+    r"^(\d{2}-\d{2} \d{2}:\d{2}:\d{2}\.\d{3}).*?RECV seq=(\d+) nal_b=(\d+) ts_us=(\d+)",
+    re.MULTILINE
+)
+DECODE_RE    = re.compile(
+    r"^(\d{2}-\d{2} \d{2}:\d{2}:\d{2}\.\d{3}).*?DECODE seq=(\d+) dec_us=(\d+) ts_us=(\d+)",
+    re.MULTILINE
+)
+RECV_FAIL_RE = re.compile(r"RECV_FAIL seq=(\d+) nal_b=(\d+) ts_us=(\d+)")
+TPUT_RECV_RE = re.compile(r"RECV_TPUT nal_b=(\d+) ts_us=(\d+)")
+BLE_TPUT_RE  = re.compile(r"kbps=([\d.]+)")
+FRAG_SEND_RE = re.compile(r"FRAG_SEND total=(\d+) size=(\d+)")
+FRAG_RECV_RE = re.compile(r"FRAG_RECV idx=(\d+) total=(\d+)")
+FRAG_DONE_RE = re.compile(r"FRAG_DONE total=(\d+)")
+DUP_CONN_RE  = re.compile(
+    r"Dropping duplicate connection to peer|already connected via another address|"
+    r"Blocking .*duplicate peer"
+)
+
+
+def host_ts_to_us(ts_str):
+    """Convert logcat host timestamp 'MM-DD HH:MM:SS.mmm' to microseconds since midnight."""
+    parts = ts_str.split()
+    h, m, s_ms = parts[1].split(":")
+    s, ms = s_ms.split(".")
+    return (int(h) * 3600 + int(m) * 60 + int(s)) * 1_000_000 + int(ms) * 1000
 
 
 def parse_send(logcat_text):
+    # Some devices/logcat paths can emit duplicate SEND lines for the same seq.
+    # Keep first occurrence per sequence so delivery metrics are not deflated.
+    seen = set()
     rows = []
     for m in SEND_RE.finditer(logcat_text):
+        seq = int(m.group(2))
+        if seq in seen:
+            continue
+        seen.add(seq)
         rows.append({
-            "seq":    int(m.group(1)),
-            "cl":     int(m.group(2)),
-            "nal_b":  int(m.group(3)),
-            "psnr":   float(m.group(4)),
-            "ssim":   float(m.group(5)),
-            "enc_us": int(m.group(6)),
-            "ts_us":  int(m.group(7)),
+            "seq":     seq,
+            "cl":      int(m.group(3)),
+            "nal_b":   int(m.group(4)),
+            "psnr":    float(m.group(5)),
+            "ssim":    float(m.group(6)),
+            "enc_us":  int(m.group(7)),
+            "ts_us":   int(m.group(8)),
+            "host_us": host_ts_to_us(m.group(1)),
         })
     return rows
 
@@ -180,16 +254,28 @@ def parse_recv(logcat_text):
     seen = set()
     rows = []
     for m in RECV_RE.finditer(logcat_text):
-        seq = int(m.group(1))
+        seq = int(m.group(2))
         if seq not in seen:
             seen.add(seq)
-            rows.append({"seq": seq, "nal_b": int(m.group(2)), "ts_us": int(m.group(3))})
+            rows.append({
+                "seq":     seq,
+                "nal_b":   int(m.group(3)),
+                "ts_us":   int(m.group(4)),
+                "host_us": host_ts_to_us(m.group(1)),
+            })
     return rows
 
 
 def parse_recv_fail(logcat_text):
-    return [{"seq": int(m.group(1)), "nal_b": int(m.group(2)), "ts_us": int(m.group(3))}
-            for m in RECV_FAIL_RE.finditer(logcat_text)]
+    seen = set()
+    rows = []
+    for m in RECV_FAIL_RE.finditer(logcat_text):
+        seq = int(m.group(1))
+        if seq in seen:
+            continue
+        seen.add(seq)
+        rows.append({"seq": seq, "nal_b": int(m.group(2)), "ts_us": int(m.group(3))})
+    return rows
 
 
 def parse_tput_recv(logcat_text):
@@ -235,36 +321,151 @@ def stat(vals):
 
 
 def summarise(send_rows, recv_rows, recv_fail_rows=None, tput_recv_rows=None,
-              ble_tput_kbps=0.0):
-    recv_by_seq = {r["seq"]: r for r in recv_rows}
+              ble_tput_kbps=0.0, decode_rows=None, clock_offset_us=0,
+              queue_rows=None, wire_rows=None):
+    recv_by_seq   = {r["seq"]: r for r in recv_rows}
+    decode_by_seq = {r["seq"]: r for r in (decode_rows or [])}
     ss      = [r for r in send_rows if r["seq"] >= 2]
     psnrs   = [r["psnr"]   for r in ss]
     ssims   = [r["ssim"]   for r in ss]
     nals    = [r["nal_b"]  for r in ss]
     enc_uss = [r["enc_us"] for r in send_rows]
-    lats    = []
+
+    # BLE queue wait: time from frame entering sendVideo coroutine to last fragment written
+    # Purely sender-side — no cross-device clock needed
+    ble_queue_uss = []
+    ble_wire_uss  = []   # time from SEND log to SEND_WIRE (enc already done, just BLE wait)
+    if queue_rows and wire_rows:
+        for r in send_rows:
+            q = queue_rows.get(r["seq"])
+            w = wire_rows.get(r["seq"])
+            if q and w and w >= q:
+                ble_queue_uss.append(w - q)
+            if w:
+                # BLE-only wait = wire_ts - send_ts (send_ts is after encode)
+                ble_wire_uss.append(w - r["ts_us"])
+
+    # Cross-device E2E using adb-measured clock offset, filter NTP jumps
+    MAX_E2E_US = 30_000_000
+    e2e_lats = []
+    net_lats = []
+    dec_uss  = []
     for r in send_rows:
         rr = recv_by_seq.get(r["seq"])
+        dd = decode_by_seq.get(r["seq"])
         if rr:
-            lats.append(rr["ts_us"] - r["ts_us"])
+            e2e = (rr["ts_us"] - r["ts_us"]) - clock_offset_us
+            if e2e < 0 or e2e > MAX_E2E_US:
+                continue
+            e2e_lats.append(e2e)
+            if dd:
+                dec_uss.append(dd["dec_us"])
+                net = e2e - r["enc_us"] - dd["dec_us"]
+                net_lats.append(net)
+
     return {
-        "send":      len(send_rows),
-        "recv":      len(recv_rows),
-        "recv_fail": len(recv_fail_rows) if recv_fail_rows else 0,
-        "psnr_ss":   stat(psnrs),
-        "ssim_ss":   stat(ssims),
-        "nal_ss":    stat(nals),
-        "enc_us":    stat(enc_uss),
-        "lat_us":    stat(lats),
-        "enc_kbps":  encoded_bitrate_kbps(send_rows),
-        "ble_kbps":  ble_tput_kbps,
-        "recv_kbps": recv_bitrate_kbps(tput_recv_rows) if tput_recv_rows else 0.0,
+        "send":           len(send_rows),
+        "recv":           len(recv_rows),
+        "recv_fail":      len(recv_fail_rows) if recv_fail_rows else 0,
+        "psnr_ss":        stat(psnrs),
+        "ssim_ss":        stat(ssims),
+        "nal_ss":         stat(nals),
+        "enc_us":         stat(enc_uss),
+        "dec_us":         stat(dec_uss),
+        "lat_us":         stat(e2e_lats),
+        "net_us":         stat(net_lats),
+        "ble_queue_us":   stat(ble_queue_uss),   # queue entry → last frag written
+        "ble_wire_us":    stat(ble_wire_uss),     # post-encode BLE wait only
+        "clock_offset_us": clock_offset_us,
+        "enc_kbps":       encoded_bitrate_kbps(send_rows),
+        "ble_kbps":       ble_tput_kbps,
+        "recv_kbps":      recv_bitrate_kbps(tput_recv_rows) if tput_recv_rows else 0.0,
     }
+
+
+def get_pid(serial):
+    out = adb(serial, "shell", "pidof", PACKAGE, timeout=5)
+    return out.strip() if out.strip() else None
+
+
+class AppCrashError(Exception):
+    pass
+
+
+class LogAbnormalError(Exception):
+    pass
+
+
+def restart_both(sender, receiver):
+    for serial, label in [(sender, "sender"), (receiver, "receiver")]:
+        print(f"  [crash] restarting {label} ({serial})…", flush=True)
+        adb(serial, "shell", "am", "force-stop", PACKAGE, capture=False, timeout=8)
+    time.sleep(1)
+    for serial in [sender, receiver]:
+        adb(serial, "shell", "am", "start", "-n", MAIN_ACTIVITY, capture=False, timeout=8)
+        wake_screen(serial)
+    time.sleep(3)
+    grant_bt_permissions(sender)
+    grant_bt_permissions(receiver)
+    print("  [crash] apps restarted, waiting 15s for BLE reconnect…", flush=True)
+    time.sleep(15)
+
+
+def apply_anti_duplicate_mode(sender, receiver, settle_s=5):
+    """Mitigate duplicate BLE links by forcing one-sided active client behavior.
+
+    Receiver: stop scan + stop client (passive server only)
+    Sender  : keep client/scan active to own the single outgoing link
+    """
+    print("  [dup] applying anti-duplicate mode: receiver scan/client OFF, sender active", flush=True)
+
+    receiver_cmds = ["stop_scan", "stop_client", "start_server"]
+    sender_cmds = ["start_server", "start_client", "stop_scan"]
+
+    for cmd in receiver_cmds:
+        try:
+            broadcast(receiver, cmd=cmd)
+        except Exception:
+            pass
+        time.sleep(0.25)
+
+    for cmd in sender_cmds:
+        try:
+            broadcast(sender, cmd=cmd)
+        except Exception:
+            pass
+        time.sleep(0.25)
+
+    time.sleep(settle_s)
+
+
+def validate_pass_logs(send_rows, ble_kbps_vals, fps, duration):
+    """Raise LogAbnormalError when logs indicate an invalid/aborted pass.
+
+    This catches cases where video started but throughput logs never appeared
+    (observed as repeated "kbps=n/a") or frame sending was clearly abnormal.
+    """
+    issues = []
+    expected_send_min = max(10, int(fps * duration * 0.5))
+    if len(send_rows) < expected_send_min:
+        issues.append(
+            f"too few SEND rows ({len(send_rows)} < {expected_send_min})"
+        )
+
+    min_kbps_samples = max(2, int(duration // 20))
+    if len(ble_kbps_vals) < min_kbps_samples:
+        issues.append(
+            f"too few BLE_THROUGHPUT samples ({len(ble_kbps_vals)} < {min_kbps_samples})"
+        )
+
+    if issues:
+        raise LogAbnormalError("; ".join(issues))
 
 
 # ── test runner ───────────────────────────────────────────────────────────────
 
-def run_pass(sender, receiver, receiver_peer, cl, fps, bitrate, duration, src, w, h):
+def run_pass(sender, receiver, receiver_peer, cl, fps, bitrate, duration, src, w, h,
+             clock_offset_us=0):
     label = "DACE OFF" if cl == 0 else ("DACE ON auto" if cl == -1 else f"DACE ON cl={cl}")
     print(f"\n  [{label}] cl={cl}  {duration}s  {fps}fps  {bitrate}bps")
 
@@ -277,7 +478,8 @@ def run_pass(sender, receiver, receiver_peer, cl, fps, bitrate, duration, src, w
     sender_proc, sender_fh = start_logcat_stream(
         sender,   ["latency:I", "BLE_THROUGHPUT:I", "BLE_FRAG:I"], send_log_path)
     receiver_proc, receiver_fh = start_logcat_stream(
-        receiver, ["latency:I", "BLE_TPUT_RECV:I",  "BLE_FRAG:I"], recv_log_path)
+        receiver, ["latency:I", "BLE_TPUT_RECV:I", "BLE_FRAG:I",
+                   "BluetoothMeshService:I", "BluetoothGattClientManager:I"], recv_log_path)
     time.sleep(0.2)
 
     bring_to_foreground(sender)
@@ -287,11 +489,30 @@ def run_pass(sender, receiver, receiver_peer, cl, fps, bitrate, duration, src, w
         extras["src"] = src
     broadcast(sender, **extras)
 
+    sender_pid   = get_pid(sender)
+    receiver_pid = get_pid(receiver)
+    consecutive_na = 0
+    stagnant_send_count = 0
+    last_send_count = None
+    bad_window_s = max(20, min(40, int(duration * 0.5)))
+
     t0 = time.time()
     while time.time() - t0 < duration:
         time.sleep(10)
         wake_screen(sender)
         elapsed = time.time() - t0
+
+        # ── crash detection ──────────────────────────────────────────────────
+        cur_spid = get_pid(sender)
+        cur_rpid = get_pid(receiver)
+        if cur_spid != sender_pid or cur_rpid != receiver_pid:
+            who = []
+            if cur_spid != sender_pid:   who.append("sender")
+            if cur_rpid != receiver_pid: who.append("receiver")
+            stop_logcat_stream(sender_proc, sender_fh)
+            stop_logcat_stream(receiver_proc, receiver_fh)
+            raise AppCrashError(f"{', '.join(who)} crashed at {elapsed:.0f}s")
+
         try:
             with open(send_log_path) as f:
                 cur = f.read()
@@ -304,6 +525,40 @@ def run_pass(sender, receiver, receiver_peer, cl, fps, bitrate, duration, src, w
                     kbps = m.group(1)
         except OSError:
             send_now, kbps = "?", "n/a"
+
+        send_now_int = send_now if isinstance(send_now, int) else None
+        if kbps == "n/a":
+            consecutive_na += 1
+        else:
+            consecutive_na = 0
+
+        if send_now_int is None:
+            stagnant_send_count += 1
+        else:
+            if last_send_count is not None and send_now_int <= last_send_count:
+                stagnant_send_count += 1
+            else:
+                stagnant_send_count = 0
+            last_send_count = send_now_int
+
+        if elapsed >= bad_window_s and (
+            consecutive_na >= 3
+            or stagnant_send_count >= 3
+            or (last_send_count is not None and last_send_count == 0)
+        ):
+            try:
+                broadcast(sender, cmd="stop_video")
+            except Exception:
+                pass
+            stop_logcat_stream(sender_proc, sender_fh)
+            stop_logcat_stream(receiver_proc, receiver_fh)
+            raise LogAbnormalError(
+                "runtime log abnormal: "
+                f"consecutive_kbps_na={consecutive_na}, "
+                f"stagnant_send_windows={stagnant_send_count}, "
+                f"send_now={last_send_count}"
+            )
+
         print(f"    {elapsed:4.0f}s  SEND={send_now}  ble_link={kbps}kbps", flush=True)
 
     broadcast(sender, cmd="stop_video")
@@ -316,16 +571,26 @@ def run_pass(sender, receiver, receiver_peer, cl, fps, bitrate, duration, src, w
     recv_rows      = parse_recv(recv_log)
     recv_fail_rows = parse_recv_fail(recv_log)
     tput_recv_rows = parse_tput_recv(recv_log)
+    decode_rows    = [{"seq": int(m.group(2)), "dec_us": int(m.group(3)),
+                       "ts_us": int(m.group(4)), "host_us": host_ts_to_us(m.group(1))}
+                      for m in DECODE_RE.finditer(recv_log)]
+    queue_rows     = {int(m.group(2)): int(m.group(3)) for m in SEND_QUEUE_RE.finditer(send_log)}
+    wire_rows      = {int(m.group(2)): int(m.group(3)) for m in SEND_WIRE_RE.finditer(send_log)}
     ble_kbps_vals  = [float(m.group(1)) for m in BLE_TPUT_RE.finditer(send_log)]
     ble_tput_avg   = statistics.mean(ble_kbps_vals) if ble_kbps_vals else 0.0
 
+    validate_pass_logs(send_rows, ble_kbps_vals, fps, duration)
+
     frags_sent, frags_recv, frames_done, dup_factor = parse_frag_stats(send_log, recv_log)
-    if dup_factor > 1:
-        print(f"  [warn] duplicate BLE connections detected (×{dup_factor}) — "
-              f"frag/frame counts divided by {dup_factor}")
+    dup_events = len(DUP_CONN_RE.findall(recv_log))
+    if dup_events > 0:
+        raise LogAbnormalError(
+            f"duplicate BLE connections detected ({dup_events} events); discarding pass"
+        )
 
     s = summarise(send_rows, recv_rows, recv_fail_rows, tput_recv_rows,
-                  ble_tput_avg / dup_factor)
+                  ble_tput_avg / dup_factor, decode_rows, clock_offset_us,
+                  queue_rows, wire_rows)
     s["recv_kbps"] = s["recv_kbps"] / dup_factor
     s["cl"]          = cl
     s["label"]       = label
@@ -357,6 +622,8 @@ def main():
                     help="Output CSV/txt prefix (default /tmp/ble_video)")
     ap.add_argument("--no-push",   action="store_true",
                     help="Skip pushing YUV file to sender")
+    ap.add_argument("--runs",      type=int, default=1,
+                    help="Number of test runs to average (default 1)")
     args = ap.parse_args()
 
     sender   = args.sender
@@ -419,37 +686,151 @@ def main():
         print(f"\nWARNING: Sender doesn't see {receiver_peer} yet. Waiting 15s…")
         time.sleep(15)
 
+    print("[setup] Measuring clock offset…")
+    clock_offset_us = get_clock_offset(sender, receiver)
+    print(f"  Clock offset: {clock_offset_us / 1000:.1f} ms (receiver - sender)")
+
     results = {}
+    anti_duplicate_mode = False
 
-    for cl in cls:
-        s, send_rows, recv_rows = run_pass(
-            sender, receiver, receiver_peer,
-            cl, args.fps, args.bitrate, args.duration,
-            args.src, args.w, args.h
-        )
-        results[cl] = s
+    # run_results[cl] = list of per-run result dicts
+    run_results = {cl: [] for cl in cls}
 
-        csv_path = f"{args.out}_cl{cl}.csv"
-        recv_by_seq = {r["seq"]: r for r in recv_rows}
-        with open(csv_path, "w") as f:
-            f.write("seq,cl,nal_b,psnr_db,ssim,enc_us,recv_ts_us,lat_us\n")
-            for r in send_rows:
-                rr = recv_by_seq.get(r["seq"])
-                recv_ts = rr["ts_us"] if rr else ""
-                lat     = (rr["ts_us"] - r["ts_us"]) if rr else ""
-                f.write(f"{r['seq']},{r['cl']},{r['nal_b']},{r['psnr']:.3f},"
-                        f"{r['ssim']:.4f},{r['enc_us']},{recv_ts},{lat}\n")
-        print(f"  CSV → {csv_path}")
+    for run in range(args.runs):
+        if args.runs > 1:
+            print(f"\n{'━'*66}")
+            print(f"  RUN {run+1}/{args.runs}")
+            print(f"{'━'*66}")
 
-        if cl != cls[-1]:
-            time.sleep(5)
+        for cl in cls:
+            if anti_duplicate_mode:
+                apply_anti_duplicate_mode(sender, receiver, settle_s=2)
+
+            MAX_RETRIES = 3
+            for attempt in range(MAX_RETRIES):
+                try:
+                    s, send_rows, recv_rows = run_pass(
+                        sender, receiver, receiver_peer,
+                        cl, args.fps, args.bitrate, args.duration,
+                        args.src, args.w, args.h, clock_offset_us
+                    )
+                    break
+                except AppCrashError as e:
+                    print(f"  [crash] {e} — retrying pass (attempt {attempt+1}/{MAX_RETRIES})")
+                    restart_both(sender, receiver)
+                    # Re-discover peer in case it changed after restart
+                    peers = get_connected_peers(sender)
+                    if peers:
+                        receiver_peer = peers[0]
+                    if attempt == MAX_RETRIES - 1:
+                        print(f"  [crash] max retries reached for cl={cl}, skipping pass")
+                        s = {"cl": cl, "label": "DACE OFF" if cl == 0 else "DACE ON auto",
+                             "send": 0, "recv": 0, "recv_fail": 0,
+                             "psnr_ss": {"avg": float("nan"), "n": 0},
+                             "ssim_ss": {"avg": float("nan"), "n": 0},
+                             "nal_ss":  {"avg": float("nan"), "n": 0},
+                             "enc_us":  {"avg": 0, "n": 0},
+                             "dec_us":  {"avg": 0, "n": 0},
+                             "lat_us":  {"avg": float("nan"), "n": 0},
+                             "net_us":  {"avg": float("nan"), "n": 0},
+                             "enc_kbps": 0, "ble_kbps": 0, "recv_kbps": 0,
+                             "frags_sent": 0, "frags_recv": 0,
+                             "frames_done": 0, "dup_factor": 1,
+                             "clock_offset_us": 0}
+                        send_rows, recv_rows = [], []
+                except LogAbnormalError as e:
+                    print(f"  [abnormal] {e} — restarting apps and retrying pass "
+                          f"(attempt {attempt+1}/{MAX_RETRIES})")
+                    if "duplicate BLE connections" in str(e):
+                        anti_duplicate_mode = True
+                    restart_both(sender, receiver)
+                    if anti_duplicate_mode:
+                        apply_anti_duplicate_mode(sender, receiver)
+                    peers = get_connected_peers(sender)
+                    if peers:
+                        receiver_peer = peers[0]
+                    if attempt == MAX_RETRIES - 1:
+                        print(f"  [abnormal] max retries reached for cl={cl}, skipping pass")
+                        s = {"cl": cl, "label": "DACE OFF" if cl == 0 else "DACE ON auto",
+                             "send": 0, "recv": 0, "recv_fail": 0,
+                             "psnr_ss": {"avg": float("nan"), "n": 0},
+                             "ssim_ss": {"avg": float("nan"), "n": 0},
+                             "nal_ss":  {"avg": float("nan"), "n": 0},
+                             "enc_us":  {"avg": 0, "n": 0},
+                             "dec_us":  {"avg": 0, "n": 0},
+                             "lat_us":  {"avg": float("nan"), "n": 0},
+                             "net_us":  {"avg": float("nan"), "n": 0},
+                             "enc_kbps": 0, "ble_kbps": 0, "recv_kbps": 0,
+                             "frags_sent": 0, "frags_recv": 0,
+                             "frames_done": 0, "dup_factor": 1,
+                             "clock_offset_us": 0}
+                        send_rows, recv_rows = [], []
+            run_results[cl].append(s)
+
+            csv_path = f"{args.out}_run{run}_cl{cl}.csv"
+            recv_by_seq = {r["seq"]: r for r in recv_rows}
+            with open(csv_path, "w") as f:
+                f.write("seq,cl,nal_b,psnr_db,ssim,enc_us,recv_ts_us,lat_us\n")
+                for r in send_rows:
+                    rr = recv_by_seq.get(r["seq"])
+                    recv_ts = rr["ts_us"] if rr else ""
+                    lat     = (rr["ts_us"] - r["ts_us"]) if rr else ""
+                    f.write(f"{r['seq']},{r['cl']},{r['nal_b']},{r['psnr']:.3f},"
+                            f"{r['ssim']:.4f},{r['enc_us']},{recv_ts},{lat}\n")
+            print(f"  CSV → {csv_path}")
+
+            if cl != cls[-1]:
+                time.sleep(5)
+                bring_to_foreground(sender)
+                time.sleep(3)
+
+        if run < args.runs - 1:
+            print(f"\n  [inter-run] Waiting 10s before next run…")
+            time.sleep(10)
             bring_to_foreground(sender)
             time.sleep(3)
 
+    # ── Average across runs ───────────────────────────────────────────────────
+    def avg_results(runs_list):
+        """Average a list of result dicts into one, adding _std fields."""
+        import math
+        avg = {}
+        # scalar fields
+        for key in ("send", "recv", "recv_fail", "enc_kbps", "ble_kbps", "recv_kbps",
+                    "frags_sent", "frags_recv", "frames_done"):
+            vals = [r[key] for r in runs_list if key in r]
+            avg[key] = statistics.mean(vals) if vals else 0
+            avg[f"{key}_std"] = statistics.stdev(vals) if len(vals) > 1 else 0.0
+        # stat-dict fields
+        for key in ("psnr_ss", "ssim_ss", "nal_ss", "enc_us", "dec_us", "lat_us", "net_us",
+                    "ble_queue_us", "ble_wire_us"):
+            avgs = [r[key]["avg"] for r in runs_list if key in r and r[key]["n"] > 0]
+            p95s = [r[key].get("p95", float("nan")) for r in runs_list
+                    if key in r and r[key]["n"] > 0]
+            ns   = [r[key]["n"] for r in runs_list if key in r]
+            avg[key] = {
+                "avg": statistics.mean(avgs) if avgs else float("nan"),
+                "std": statistics.stdev(avgs) if len(avgs) > 1 else 0.0,
+                "p95": statistics.mean([v for v in p95s if not math.isnan(v)]) if p95s else float("nan"),
+                "n":   int(statistics.mean(ns)) if ns else 0,
+            }
+        # copy label/cl from first run
+        avg["cl"]    = runs_list[0]["cl"]
+        avg["label"] = runs_list[0]["label"]
+        avg["clock_offset_us"] = statistics.mean(
+            [r.get("clock_offset_us", 0) for r in runs_list])
+        avg["dup_factor"] = runs_list[0].get("dup_factor", 1)
+        avg["_runs"] = len(runs_list)
+        return avg
+
+    for cl in cls:
+        results[cl] = avg_results(run_results[cl]) if run_results[cl] else {}
+
     # ── Summary ───────────────────────────────────────────────────────────────
     if results:
+        n_runs = args.runs
         print("\n" + "═" * 90)
-        print("  PSNR/SSIM RESULTS  (ss = steady-state, skip IDR + correction frames)")
+        print(f"  PSNR/SSIM RESULTS  (averaged over {n_runs} run(s), ss = steady-state)")
         print("═" * 90)
         hdr = (f"{'Mode':<18} {'SEND':>5} {'RECV':>5} {'frm%':>6} {'frag%':>6}  "
                f"{'ble kbps':>9} {'rcv kbps':>9}  "
@@ -467,7 +848,7 @@ def main():
                          if s.get("frags_sent", 0) > 0 else float("nan"))
             frag_str  = f"{frag_pct:5.1f}%" if frag_pct == frag_pct else "   n/a"
             print(
-                f"{s['label']:<18} {s['send']:>5} {s['recv']:>5} {frame_pct:>5.1f}% {frag_str:>6}  "
+                f"{s['label']:<18} {s['send']:>5.0f} {s['recv']:>5.0f} {frame_pct:>5.1f}% {frag_str:>6}  "
                 f"{s['ble_kbps']:>9.1f} {s['recv_kbps']:>9.1f}  "
                 f"{psnr:>7.2f}dB {ssim:>8.4f}  {enc:>6.1f}ms"
             )
@@ -485,25 +866,75 @@ def main():
         print("═" * 90)
         print("  frm% = frame delivery (RECV/SEND) | frag% = BLE fragment delivery")
         print("  ble/rcv kbps = BLE link bytes | enc ms = encoder latency")
+        print("\n" + "═" * 90)
+        print("  LATENCY BREAKDOWN")
+        print("═" * 90)
+        for cl in cls:
+            s = results[cl]
+            n_lat = s["lat_us"]["n"]
+            n_recv = int(s["recv"])
+            discarded = n_recv - n_lat if n_recv > n_lat else 0
+            e2e = s["lat_us"]["avg"] / 1000
+            enc = s["enc_us"]["avg"] / 1000
+            dec = s["dec_us"]["avg"] / 1000 if s["dec_us"]["n"] > 0 else float("nan")
+            net = s["net_us"]["avg"] / 1000 if s["net_us"]["n"] > 0 else float("nan")
+            p95 = s["lat_us"].get("p95", float("nan")) / 1000
+            ble_q = s["ble_queue_us"]["avg"] / 1000 if s["ble_queue_us"]["n"] > 0 else float("nan")
+            ble_w = s["ble_wire_us"]["avg"] / 1000 if s["ble_wire_us"]["n"] > 0 else float("nan")
+            offset_ms = s.get("clock_offset_us", 0) / 1000
+            discard_str = f"  [{discarded} NTP-jump discarded]" if discarded > 0 else ""
+            print(f"  {s['label']:<18} E2E avg: {e2e:>6.1f}ms  p95: {p95:>6.1f}ms  "
+                  f"=  Enc: {enc:>5.1f}ms + Net: {net:>6.1f}ms + Dec: {dec:>4.1f}ms"
+                  f"  (n={n_lat}, clk_off={offset_ms:+.0f}ms){discard_str}")
+            print(f"  {'':18} BLE queue wait: {ble_q:>6.1f}ms  (enc→wire: {ble_w:>6.1f}ms)"
+                  f"  n={s['ble_queue_us']['n']}")
+        print("═" * 90)
+
+    # ── Save averaged JSON for plot script ────────────────────────────────────
+    import json, math
+
+    def _jsonify(obj):
+        if isinstance(obj, float) and math.isnan(obj):
+            return None
+        if isinstance(obj, dict):
+            return {k: _jsonify(v) for k, v in obj.items()}
+        if isinstance(obj, list):
+            return [_jsonify(v) for v in obj]
+        return obj
+
+    json_path = f"{args.out}_averaged.json"
+    payload = {
+        "meta": {
+            "sender": sender, "receiver": receiver,
+            "fps": args.fps, "bitrate": args.bitrate,
+            "duration": args.duration, "runs": args.runs,
+            "src": args.src, "w": args.w, "h": args.h,
+        },
+        "results": {str(cl): _jsonify(results[cl]) for cl in cls},
+    }
+    with open(json_path, "w") as f:
+        json.dump(payload, f, indent=2)
+    print(f"\nAveraged JSON → {json_path}")
 
     summary_path = f"{args.out}_summary.txt"
     with open(summary_path, "w") as f:
         f.write(f"BLE video test — sender={sender} receiver={receiver}\n")
         f.write(f"CLs={cls} duration={args.duration}s fps={args.fps} "
-                f"bitrate={args.bitrate}bps\n\n")
+                f"bitrate={args.bitrate}bps  runs={args.runs}\n\n")
         if results:
-            f.write(f"{'Mode':<18} {'SEND':>5} {'RECV':>5} {'fail':>5}  "
+            f.write(f"{'Mode':<18} {'SEND':>5} {'RECV':>5} {'frm%':>6}  "
                     f"{'enc_kbps':>9} {'ble_kbps':>9} {'rcv_kbps':>9}  "
                     f"{'PSNR_ss':>8} {'SSIM_ss':>8}  {'enc_ms':>7}\n")
             for cl in cls:
                 s = results[cl]
+                frm_pct = 100.0 * s['recv'] / s['send'] if s['send'] > 0 else 0.0
                 f.write(
-                    f"{s['label']:<18} {s['send']:>5} {s['recv']:>5} {s['recv_fail']:>5}  "
+                    f"{s['label']:<18} {s['send']:>5.0f} {s['recv']:>5.0f} {frm_pct:>5.1f}%  "
                     f"{s['enc_kbps']:>8.1f} {s['ble_kbps']:>9.1f} {s['recv_kbps']:>9.1f}  "
                     f"{s['psnr_ss']['avg']:>7.2f}dB {s['ssim_ss']['avg']:>8.4f}  "
                     f"{s['enc_us']['avg']/1000:>6.1f}ms\n"
                 )
-    print(f"\nSummary → {summary_path}  |  CSVs: {args.out}_cl<N>.csv")
+    print(f"Summary → {summary_path}  |  CSVs: {args.out}_run<N>_cl<N>.csv")
 
 
 if __name__ == "__main__":

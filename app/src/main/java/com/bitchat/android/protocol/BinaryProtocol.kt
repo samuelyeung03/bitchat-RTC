@@ -19,6 +19,7 @@ enum class MessageType(val value: UByte) {
     VIDEO(0x15u),         // Video frame packet (H.264 DACE NAL units)
     VIDEO_ACK(0x16u),     // ACK for video packet
     VIDEO_INVITE(0x17u),  // Invitation to start video call
+    RTC_SYNC(0x18u),      // RTC session parameters (resolution, fps, codec)
     PING(0x4u),
     PONG(0x5u),
     NOISE_HANDSHAKE(0x10u),  // Noise handshake

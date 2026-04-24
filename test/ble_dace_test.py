@@ -170,10 +170,16 @@ def stop_logcat_stream(proc, fh):
 
 
 def parse_send(logcat_text):
+    # Some adb/logcat setups duplicate lines; dedupe by seq for stable counters.
+    seen = set()
     rows = []
     for m in SEND_RE.finditer(logcat_text):
+        seq = int(m.group(1))
+        if seq in seen:
+            continue
+        seen.add(seq)
         rows.append({
-            "seq":    int(m.group(1)),
+            "seq":    seq,
             "cl":     int(m.group(2)),
             "nal_b":  int(m.group(3)),
             "psnr":   float(m.group(4)),
@@ -197,9 +203,15 @@ def parse_recv(logcat_text):
 
 
 def parse_recv_fail(logcat_text):
-    return [{"seq": int(m.group(1)), "nal_b": int(m.group(2)),
-             "ts_us": int(m.group(3))}
-            for m in RECV_FAIL_RE.finditer(logcat_text)]
+    seen = set()
+    rows = []
+    for m in RECV_FAIL_RE.finditer(logcat_text):
+        seq = int(m.group(1))
+        if seq in seen:
+            continue
+        seen.add(seq)
+        rows.append({"seq": seq, "nal_b": int(m.group(2)), "ts_us": int(m.group(3))})
+    return rows
 
 
 def parse_tput_recv(logcat_text):

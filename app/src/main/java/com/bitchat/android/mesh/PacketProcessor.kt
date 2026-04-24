@@ -163,6 +163,7 @@ class PacketProcessor(private val myPeerID: String) {
                         MessageType.VOICE_INVITE -> handleVoiceInvite(routed)
                         MessageType.VIDEO -> handleVideo(routed)
                         MessageType.VIDEO_ACK -> handleVideoAck(routed)
+                        MessageType.RTC_SYNC -> handleRtcSync(routed)
                         else -> {
                             validPacket = false
                             Log.w(TAG, "Unknown message type: ${packet.type}")
@@ -306,6 +307,12 @@ class PacketProcessor(private val myPeerID: String) {
         delegate?.onVideoAckReceived(routed)
     }
 
+    private suspend fun handleRtcSync(routed: RoutedPacket) {
+        val peerID = routed.peerID ?: "unknown"
+        Log.d(TAG, "Processing RTC_SYNC from ${formatPeerForLog(peerID)}")
+        delegate?.onRtcSyncReceived(routed)
+    }
+
     private suspend fun handleVoiceAck(routed: RoutedPacket) {
         val peerID = routed.peerID ?: "unknown"
         Log.d(TAG, "Processing VOICE_ACK from ${formatPeerForLog(peerID)}")
@@ -391,6 +398,7 @@ interface PacketProcessorDelegate {
     fun onVoiceAckReceived(routed: RoutedPacket)
     fun handleVideo(routed: RoutedPacket)
     fun onVideoAckReceived(routed: RoutedPacket)
+    fun onRtcSyncReceived(routed: RoutedPacket)
 
     // Communication
     fun sendAnnouncementToPeer(peerID: String)

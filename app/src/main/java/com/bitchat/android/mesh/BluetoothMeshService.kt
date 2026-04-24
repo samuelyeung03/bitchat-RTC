@@ -471,6 +471,10 @@ class BluetoothMeshService(private val context: Context) {
                 rtcConnectionManager.handleVideoAck(routed.packet)
             }
 
+            override fun onRtcSyncReceived(routed: RoutedPacket) {
+                rtcConnectionManager.handleRtcSync(routed.packet, routed.peerID ?: "")
+            }
+
             override fun validatePacketSecurity(packet: BitchatPacket, peerID: String): Boolean {
                 return securityManager.validatePacket(packet, peerID)
             }
@@ -948,7 +952,8 @@ class BluetoothMeshService(private val context: Context) {
             ((payload[0].toInt() and 0xFF) shl 8) or (payload[1].toInt() and 0xFF)
         } else { -1 }
 
-        Log.d(TAG, "🎬 sendVideo: recipient=${recipientPeerID ?: "BROADCAST"}, payloadSize=${payload.size}, seq=$seq")
+        val queueTsUs = System.currentTimeMillis() * 1000L
+        Log.i("latency", "SEND_QUEUE seq=$seq ts_us=$queueTsUs")
 
         serviceScope.launch {
             try {
@@ -962,17 +967,15 @@ class BluetoothMeshService(private val context: Context) {
                     signature   = null,
                     ttl         = com.bitchat.android.util.AppConstants.MESSAGE_TTL_HOPS
                 )
-                // Skip signing for video packets — saves 64 bytes per frame (≈1 fewer BLE fragment)
-                // Video is ephemeral; authentication is not needed for real-time frames.
                 val transferId = sha256Hex(payload)
-                // Use targeted send when recipient is known — avoids broadcasting to all mesh peers
                 val sent = if (recipientPeerID != null) {
                     connectionManager.sendPacketToPeer(recipientPeerID, packet, transferId = transferId)
                 } else {
                     connectionManager.broadcastPacket(RoutedPacket(packet, transferId = transferId))
                     true
                 }
-                Log.d(TAG, "🚀 sendVideo: ${if (recipientPeerID != null) "targeted->$recipientPeerID" else "broadcast"} seq=$seq sent=$sent")
+                val wireTsUs = System.currentTimeMillis() * 1000L
+                Log.i("latency", "SEND_WIRE seq=$seq ts_us=$wireTsUs")
             } catch (e: Exception) {
                 Log.e(TAG, "❌ Failed to send video frame seq=$seq: ${e.message}")
             }
@@ -1001,6 +1004,39 @@ class BluetoothMeshService(private val context: Context) {
                 Log.d(TAG, "🎬 Sent VIDEO_ACK for seq=$seq to $recipientPeerID")
             } catch (e: Exception) {
                 Log.e(TAG, "❌ Failed to send video ack seq=$seq: ${e.message}")
+            }
+        }
+    }
+
+    fun sendRtcSync(recipientPeerID: String, width: Int, height: Int, bitrate: Int) {
+        serviceScope.launch {
+            try {
+                val sync = com.bitchat.android.rtc.RTCSync(
+                    syncType = com.bitchat.android.rtc.RTCSync.SyncType.INVITE,
+                    callType = com.bitchat.android.rtc.RTCSync.CallType.VIDEO,
+                    mode = com.bitchat.android.rtc.RTCSync.Mode.ONE_WAY,
+                    videoParams = com.bitchat.android.rtc.RTCSync.VideoParams(
+                        codec = "h264",
+                        width = width,
+                        height = height,
+                        bitrateBps = bitrate
+                    )
+                )
+                val packet = BitchatPacket(
+                    version     = 1u,
+                    type        = MessageType.RTC_SYNC.value,
+                    senderID    = hexStringToByteArray(myPeerID),
+                    recipientID = hexStringToByteArray(recipientPeerID),
+                    timestamp   = System.currentTimeMillis().toULong(),
+                    payload     = sync.encode(),
+                    signature   = null,
+                    ttl         = com.bitchat.android.util.AppConstants.MESSAGE_TTL_HOPS
+                )
+                val signed = signPacketBeforeBroadcast(packet)
+                connectionManager.broadcastPacket(RoutedPacket(signed))
+                Log.d(TAG, "📨 Sent RTC_SYNC to $recipientPeerID: ${width}x${height} @ ${bitrate}bps")
+            } catch (e: Exception) {
+                Log.e(TAG, "❌ Failed to send RTC_SYNC: ${e.message}")
             }
         }
     }

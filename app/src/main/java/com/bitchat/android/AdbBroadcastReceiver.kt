@@ -45,7 +45,8 @@ class AdbBroadcastReceiver : BroadcastReceiver() {
                 if (peerId.isNullOrBlank()) {
                     Log.e(TAG, "ERROR start_video requires --es peer_id <hex>")
                 } else {
-                    val cl      = intent.getIntExtra("cl", -1)
+                    // cl may arrive as --el (long) for negative values like -1
+                    val cl = intent.getLongExtra("cl", intent.getIntExtra("cl", -1).toLong()).toInt()
                     val fps     = intent.getIntExtra("fps", com.bitchat.android.util.AppConstants.Dace.DEFAULT_FPS)
                     val bitrate = intent.getIntExtra("bitrate", com.bitchat.android.util.AppConstants.Dace.DEFAULT_BITRATE_BPS)
                     val src  = intent.getStringExtra("src")

@@ -19,10 +19,20 @@ import com.bitchat.android.util.AppConstants
  *   3. Call [release] when the call ends.
  */
 class VideoOutputDevice(
-    private val textureView: TextureView,
-    private val width: Int  = AppConstants.Dace.DEFAULT_WIDTH,
-    private val height: Int = AppConstants.Dace.DEFAULT_HEIGHT
+    textureView: TextureView? = null,
+    private var width: Int  = AppConstants.Dace.DEFAULT_WIDTH,
+    private var height: Int = AppConstants.Dace.DEFAULT_HEIGHT
 ) {
+    @Volatile private var textureView: TextureView? = textureView
+
+    fun setTextureView(view: TextureView) {
+        textureView = view
+    }
+
+    fun setResolution(w: Int, h: Int) {
+        width = w
+        height = h
+    }
     companion object {
         private const val TAG = "VideoOutputDevice"
     }
@@ -36,16 +46,25 @@ class VideoOutputDevice(
      */
     fun renderFrame(yuv420: ByteArray) {
         renderHandler.post {
-            if (!textureView.isAvailable) return@post
-            val canvas = textureView.lockCanvas() ?: return@post
+            val tv = textureView ?: return@post
+            if (!tv.isAvailable) return@post
+            val canvas = tv.lockCanvas() ?: return@post
             try {
                 val bitmap = yuv420ToBitmap(yuv420, width, height)
-                canvas.drawBitmap(bitmap, 0f, 0f, null)
+                val viewWidth = tv.width.toFloat()
+                val viewHeight = tv.height.toFloat()
+                val scale = minOf(viewWidth / width, viewHeight / height)
+                val scaledWidth = width * scale
+                val scaledHeight = height * scale
+                val left = (viewWidth - scaledWidth) / 2
+                val top = (viewHeight - scaledHeight) / 2
+                val dst = android.graphics.RectF(left, top, left + scaledWidth, top + scaledHeight)
+                canvas.drawBitmap(bitmap, null, dst, null)
                 bitmap.recycle()
             } catch (e: Exception) {
                 Log.w(TAG, "renderFrame error: ${e.message}")
             } finally {
-                textureView.unlockCanvasAndPost(canvas)
+                tv.unlockCanvasAndPost(canvas)
             }
         }
     }

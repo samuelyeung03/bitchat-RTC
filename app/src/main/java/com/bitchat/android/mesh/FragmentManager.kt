@@ -23,9 +23,10 @@ class FragmentManager {
         private const val TAG = "FragmentManager"
         // iOS values: 512 MTU threshold, 469 max fragment size (512 MTU - headers)
         private const val FRAGMENT_SIZE_THRESHOLD = com.bitchat.android.util.AppConstants.Fragmentation.FRAGMENT_SIZE_THRESHOLD // Matches iOS: if data.count > 512
-        private const val MAX_FRAGMENT_SIZE = com.bitchat.android.util.AppConstants.Fragmentation.MAX_FRAGMENT_SIZE        // Matches iOS: maxFragmentSize = 469 
+        private const val MAX_FRAGMENT_SIZE = com.bitchat.android.util.AppConstants.Fragmentation.MAX_FRAGMENT_SIZE        // Matches iOS: maxFragmentSize = 469
         private const val FRAGMENT_TIMEOUT = com.bitchat.android.util.AppConstants.Fragmentation.FRAGMENT_TIMEOUT_MS     // Matches iOS: 30 seconds cleanup
         private const val CLEANUP_INTERVAL = com.bitchat.android.util.AppConstants.Fragmentation.CLEANUP_INTERVAL_MS     // 10 seconds cleanup check
+        private const val MAX_PENDING_FRAMES = com.bitchat.android.util.AppConstants.Fragmentation.MAX_PENDING_FRAMES
     }
     private val debugManager by lazy { try { com.bitchat.android.ui.debug.DebugSettingsManager.getInstance() } catch (e: Exception) { null } }
     // Fragment storage - iOS equivalent: incomingFragments: [String: [Int: Data]]
@@ -152,10 +153,19 @@ class FragmentManager {
             
             // iOS: if incomingFragments[fragmentID] == nil
             if (!incomingFragments.containsKey(fragmentIDString)) {
+                // Drop oldest incomplete frame if at limit
+                if (incomingFragments.size >= MAX_PENDING_FRAMES) {
+                    val oldest = fragmentMetadata.minByOrNull { it.value.third }?.key
+                    if (oldest != null) {
+                        incomingFragments.remove(oldest)
+                        fragmentMetadata.remove(oldest)
+                        Log.w(TAG, "Dropped oldest incomplete frame $oldest (limit=$MAX_PENDING_FRAMES)")
+                    }
+                }
                 incomingFragments[fragmentIDString] = mutableMapOf()
                 fragmentMetadata[fragmentIDString] = Triple(
-                    fragmentPayload.originalType, 
-                    fragmentPayload.total, 
+                    fragmentPayload.originalType,
+                    fragmentPayload.total,
                     System.currentTimeMillis()
                 )
             }

@@ -128,6 +128,14 @@ fun ChatScreen(viewModel: ChatViewModel) {
                     .height(headerHeight)
             )
 
+            // Video display area
+            VideoCallView(
+                modifier = Modifier.fillMaxWidth(),
+                onTextureViewReady = { textureView ->
+                    viewModel.meshService.rtcConnectionManager.videoOutputDevice.setTextureView(textureView)
+                }
+            )
+
             // Messages area - takes up available space, will compress when keyboard appears
             MessagesList(
                 messages = displayMessages,

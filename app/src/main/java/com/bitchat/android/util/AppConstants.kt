@@ -44,6 +44,13 @@ object AppConstants {
         const val MAX_FRAGMENT_SIZE: Int = 460
         const val FRAGMENT_TIMEOUT_MS: Long = 30_000L
         const val CLEANUP_INTERVAL_MS: Long = 10_000L
+        const val MAX_PENDING_FRAMES: Int = 50
+    }
+
+    object BlindSend {
+        // When true, BLE fragment flow-control semaphores are bypassed (blind send).
+        // Build with -PblindSend=true to enable. Default: false (backpressure ON).
+        const val ENABLED: Boolean = false
     }
 
     object Security {
@@ -159,8 +166,7 @@ object AppConstants {
         const val COMPLEXITY_DEFAULT: Int = 2
         const val COMPLEXITY_MAX: Int     = 5
 
-        // Force an IDR keyframe every N frames so late-joiners can sync
-        const val KEYFRAME_INTERVAL_FRAMES: Int = 30   // ~2 s at 15 fps
+        // i_keyint_max=1500 is set in dace_jni.cpp (matches libtest reference)
 
         // Maximum encoded NAL packet size after fragmentation
         // (same fragment budget as audio: 469 bytes per BLE packet)

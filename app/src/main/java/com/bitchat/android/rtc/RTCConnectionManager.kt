@@ -73,7 +73,8 @@ class RTCConnectionManager(
     private var videoDecoder: VideoDecoder? = null
     private var videoInputDevice: VideoInputDevice? = null
     private var videoFileInputDevice: YuvFileInputDevice? = null
-    private var videoOutputDevice: VideoOutputDevice? = null
+    // Created eagerly so the UI can attach a TextureView before startVideo() is called
+    var videoOutputDevice: VideoOutputDevice = VideoOutputDevice()
     private var videoCaptureJob: Job? = null
     private var videoSeqNumber: Int = 0
     private var videoFrameCount: Int = 0
@@ -418,8 +419,11 @@ class RTCConnectionManager(
 
         videoDecoder = DACEDecoder(width, height)
 
-        remoteView?.let {
-            videoOutputDevice = VideoOutputDevice(it, width, height)
+        remoteView?.let { videoOutputDevice.setTextureView(it) }
+
+        // Notify receiver of resolution so it can pre-init its decoder
+        if (recipientId != null) {
+            meshServiceRef?.sendRtcSync(recipientId, width, height, bitrate)
         }
 
         if (useFileSource) {
@@ -434,8 +438,6 @@ class RTCConnectionManager(
                 videoEncoder = null
                 videoDecoder?.release()
                 videoDecoder = null
-                videoOutputDevice?.release()
-                videoOutputDevice = null
                 return
             }
             Log.i(TAG, "DACE video started from file: $filePath ${width}x${height} @${fps}fps to ${recipientId ?: "BROADCAST"}")
@@ -467,8 +469,6 @@ class RTCConnectionManager(
         videoEncoder = null
         videoDecoder?.release()
         videoDecoder = null
-        videoOutputDevice?.release()
-        videoOutputDevice = null
         videoSeqNumber = 0
         videoFrameCount = 0
         bypassEncode = false
@@ -489,7 +489,7 @@ class RTCConnectionManager(
             cl = 0; psnr = 0.0; ssim = 0.0; encUs = 0L
         } else {
             val enc = videoEncoder ?: run { Log.w(TAG, "sendEncodedVideoFrame: no encoder"); return }
-            val forceKey = (videoFrameCount % AppConstants.Dace.KEYFRAME_INTERVAL_FRAMES) == 1
+            val forceKey = false  // x264 handles IDR via i_keyint_max=1500 (scene change detection)
             Log.d(TAG, "sendEncodedVideoFrame: seq=$seq forceKey=$forceKey yuv=${yuv420.size}")
             nalBytes = enc.encode(yuv420, forceKey) ?: run {
                 Log.w(TAG, "sendEncodedVideoFrame: encode returned null for seq=$seq"); return }
@@ -509,12 +509,23 @@ class RTCConnectionManager(
 
         val tsUs = System.currentTimeMillis() * 1000L
         Log.i(LATENCY_TAG, "SEND seq=$seq cl=$cl nal_b=${nalBytes.size} psnr=${"%.2f".format(psnr)} ssim=${"%.4f".format(ssim)} enc_us=$encUs ts_us=$tsUs")
-
         try {
             meshServiceRef?.sendVideo(recipientId, payload)
                 ?: Log.w(TAG, "No BluetoothMeshService attached for video — call attachMeshService() first")
         } catch (e: Exception) {
             Log.w(TAG, "Failed to send video frame: ${e.message}")
+        }
+    }
+
+    fun handleRtcSync(packet: BitchatPacket, fromPeerId: String) {
+        val sync = RTCSync.decode(packet.payload) ?: return
+        val vp = sync.videoParams ?: return
+        Log.i(TAG, "RTC_SYNC from $fromPeerId: ${vp.width}x${vp.height} @ ${vp.bitrateBps}bps")
+        synchronized(this) {
+            videoDecoder?.release()
+            videoDecoder = DACEDecoder(vp.width, vp.height)
+            videoOutputDevice.setResolution(vp.width, vp.height)
+            Log.i(TAG, "handleRtcSync: decoder initialized ${vp.width}x${vp.height}")
         }
     }
 
@@ -533,19 +544,21 @@ class RTCConnectionManager(
 
         val tsUs = System.currentTimeMillis() * 1000L
         Log.i(LATENCY_TAG, "RECV seq=$seq nal_b=${nalData.size} ts_us=$tsUs")
-        // Receiver-side throughput measurement (aggregated by test script)
         Log.i("BLE_TPUT_RECV", "RECV_TPUT nal_b=${nalData.size} ts_us=$tsUs")
 
-        // Video ACKs disabled — they consume reverse BLE bandwidth without flow-control benefit
-        // meshServiceRef?.sendVideoAck(packet.senderID.toHexString(), seq)
-
-        val dec = videoDecoder ?: return
-        val yuv420 = dec.decode(nalData)
+        val dec = videoDecoder ?: run {
+            Log.w(TAG, "handleIncomingVideo: decoder not ready, dropping seq=$seq")
+            return
+        }
+        val decStart = System.currentTimeMillis() * 1000L
+        val yuv420 = synchronized(dec) { dec.decode(nalData) }
+        val decEnd = System.currentTimeMillis() * 1000L
         if (yuv420 == null) {
             Log.w(LATENCY_TAG, "RECV_FAIL seq=$seq nal_b=${nalData.size} ts_us=$tsUs")
             return
         }
-        videoOutputDevice?.renderFrame(yuv420)
+        Log.i(LATENCY_TAG, "DECODE seq=$seq dec_us=${decEnd - decStart} ts_us=$decEnd")
+        videoOutputDevice.renderFrame(yuv420)
     }
 
     fun handleVideoAck(packet: BitchatPacket) {
