@@ -1,0 +1,173 @@
+{
+  "meta": {
+    "sender": "T1AIOC656909KGK",
+    "receiver": "8e27af28",
+    "fps": 10,
+    "bitrate": 1000000,
+    "duration": 30,
+    "runs": 1,
+    "src": "/data/local/tmp/complex_1280x720.yuv",
+    "w": 1280,
+    "h": 720
+  },
+  "results": {
+    "-1": {
+      "send": 288,
+      "send_std": 0.0,
+      "recv": 218,
+      "recv_std": 0.0,
+      "recv_fail": 218,
+      "recv_fail_std": 0.0,
+      "enc_kbps": 917.5897671367662,
+      "enc_kbps_std": 0.0,
+      "ble_kbps": 988.0166666666667,
+      "ble_kbps_std": 0.0,
+      "recv_kbps": 693.6536349587348,
+      "recv_kbps_std": 0.0,
+      "frags_sent": 7766,
+      "frags_sent_std": 0.0,
+      "frags_recv": 6256,
+      "frags_recv_std": 0.0,
+      "frames_done": 218,
+      "frames_done_std": 0.0,
+      "psnr_ss": {
+        "avg": 25.892727272727274,
+        "std": 0.0,
+        "p95": 32.39,
+        "n": 286
+      },
+      "ssim_ss": {
+        "avg": 0.7173353146853146,
+        "std": 0.0,
+        "p95": 0.8597,
+        "n": 286
+      },
+      "nal_ss": {
+        "avg": 12104.40909090909,
+        "std": 0.0,
+        "p95": 14596,
+        "n": 286
+      },
+      "enc_us": {
+        "avg": 62052.53472222222,
+        "std": 0.0,
+        "p95": 98263,
+        "n": 288
+      },
+      "dec_us": {
+        "avg": null,
+        "std": 0.0,
+        "p95": null,
+        "n": 0
+      },
+      "lat_us": {
+        "avg": 4169244.9954128442,
+        "std": 0.0,
+        "p95": 7301350.5,
+        "n": 218
+      },
+      "net_us": {
+        "avg": null,
+        "std": 0.0,
+        "p95": null,
+        "n": 0
+      },
+      "ble_queue_us": {
+        "avg": 2128.472222222222,
+        "std": 0.0,
+        "p95": 3000,
+        "n": 288
+      },
+      "ble_wire_us": {
+        "avg": 2256.9444444444443,
+        "std": 0.0,
+        "p95": 3000,
+        "n": 288
+      },
+      "cl": -1,
+      "label": "DACE ON auto",
+      "clock_offset_us": -1380350.5,
+      "dup_factor": 1,
+      "_runs": 1
+    },
+    "0": {
+      "send": 297,
+      "send_std": 0.0,
+      "recv": 171,
+      "recv_std": 0.0,
+      "recv_fail": 171,
+      "recv_fail_std": 0.0,
+      "enc_kbps": 950.6771178380505,
+      "enc_kbps_std": 0.0,
+      "ble_kbps": 1120.3333333333333,
+      "ble_kbps_std": 0.0,
+      "recv_kbps": 527.1551955971107,
+      "recv_kbps_std": 0.0,
+      "frags_sent": 8041,
+      "frags_sent_std": 0.0,
+      "frags_recv": 6210,
+      "frags_recv_std": 0.0,
+      "frames_done": 171,
+      "frames_done_std": 0.0,
+      "psnr_ss": {
+        "avg": 25.46220338983051,
+        "std": 0.0,
+        "p95": 31.81,
+        "n": 295
+      },
+      "ssim_ss": {
+        "avg": 0.6978935593220339,
+        "std": 0.0,
+        "p95": 0.847,
+        "n": 295
+      },
+      "nal_ss": {
+        "avg": 12165.216949152542,
+        "std": 0.0,
+        "p95": 14872,
+        "n": 295
+      },
+      "enc_us": {
+        "avg": 35628.49494949495,
+        "std": 0.0,
+        "p95": 43777,
+        "n": 297
+      },
+      "dec_us": {
+        "avg": null,
+        "std": 0.0,
+        "p95": null,
+        "n": 0
+      },
+      "lat_us": {
+        "avg": 4662233.540935673,
+        "std": 0.0,
+        "p95": 8753350.5,
+        "n": 171
+      },
+      "net_us": {
+        "avg": null,
+        "std": 0.0,
+        "p95": null,
+        "n": 0
+      },
+      "ble_queue_us": {
+        "avg": 1996.6329966329965,
+        "std": 0.0,
+        "p95": 3000,
+        "n": 297
+      },
+      "ble_wire_us": {
+        "avg": 2090.909090909091,
+        "std": 0.0,
+        "p95": 3000,
+        "n": 297
+      },
+      "cl": 0,
+      "label": "DACE OFF",
+      "clock_offset_us": -1380350.5,
+      "dup_factor": 1,
+      "_runs": 1
+    }
+  }
+}

@@ -76,7 +76,7 @@ Java_com_bitchat_android_rtc_DACEWrapper_nativeCreateEncoder(
     // complexityLevel == 0   → DACE OFF (param.dace=0, superfast preset settings)
     // complexityLevel == -1  → DACE ON, auto
     // complexityLevel >= 1   → DACE ON, fixed level
-    ctx->param.i_threads = 1;
+    ctx->param.i_threads = 0;  // 0 = auto (matches libtest reference which uses 12)
     if (complexityLevel == 0) {
         ctx->param.dace = 0;  // DACE OFF: plain x264 with superfast preset analysis
     } else {

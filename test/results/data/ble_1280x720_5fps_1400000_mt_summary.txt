@@ -1,0 +1,6 @@
+BLE video test — sender=T1AIOC656909KGK receiver=8e27af28
+CLs=[-1, 0] duration=30s fps=5 bitrate=1400000bps  runs=1
+
+Mode                SEND  RECV   frm%   enc_kbps  ble_kbps  rcv_kbps   PSNR_ss  SSIM_ss   enc_ms
+DACE ON auto         151    80  53.0%    1301.9    1406.8     693.6    31.18dB   0.8554   112.1ms
+DACE OFF             151    11   7.3%    1320.6    1783.1     439.7    30.58dB   0.8427    41.2ms
