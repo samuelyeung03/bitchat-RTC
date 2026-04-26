@@ -36,10 +36,10 @@ import time
 SENDER          = "T1AIOC656909KGK"
 RECEIVER        = "8e27af28"
 RECEIVER_PEER   = "fea25dd05ccc26a6"
-SRC_PATH        = "/data/local/tmp/complex_320x240.yuv"
-SRC_W, SRC_H    = 320, 240
-DEFAULT_FPS     = 3
-DEFAULT_BITRATE = 40000
+SRC_PATH        = "/data/local/tmp/complex_1280x720.yuv"
+SRC_W, SRC_H    = 1280, 720
+DEFAULT_FPS     = 10
+DEFAULT_BITRATE = 1000000
 DEFAULT_DUR     = 60
 DEFAULT_CLS     = [-1, 0]
 PACKAGE         = "com.bitchat.droid"
@@ -866,6 +866,22 @@ def main():
         print("═" * 90)
         print("  frm% = frame delivery (RECV/SEND) | frag% = BLE fragment delivery")
         print("  ble/rcv kbps = BLE link bytes | enc ms = encoder latency")
+        print("\n" + "═" * 90)
+        print("  PACKET LOSS BREAKDOWN")
+        print("═" * 90)
+        print(f"  {'Mode':<18} {'frags_sent':>11} {'frags_recv':>11} {'frag_loss%':>11}  "
+              f"{'frames_sent':>12} {'frames_recv':>12} {'frame_loss%':>12}")
+        print("─" * 90)
+        for cl in cls:
+            s = results[cl]
+            fs = int(s.get("frags_sent", 0))
+            fr = int(s.get("frags_recv", 0))
+            frag_loss = 100.0 * (fs - fr) / fs if fs > 0 else float("nan")
+            frame_loss = 100.0 * (s["send"] - s["recv"]) / s["send"] if s["send"] > 0 else float("nan")
+            print(f"  {s['label']:<18} {fs:>11} {fr:>11} {frag_loss:>10.1f}%  "
+                  f"{int(s['send']):>12} {int(s['recv']):>12} {frame_loss:>11.1f}%")
+        print("═" * 90)
+
         print("\n" + "═" * 90)
         print("  LATENCY BREAKDOWN")
         print("═" * 90)

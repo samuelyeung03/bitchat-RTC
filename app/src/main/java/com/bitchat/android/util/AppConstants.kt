@@ -150,15 +150,12 @@ object AppConstants {
     /** Constants for DACE (Dynamic Adaptive Complexity Encoding) video codec. */
     object Dace {
         // Frame dimensions — QVGA is small enough for Bluetooth mesh bandwidth
-        const val DEFAULT_WIDTH: Int  = 320
-        const val DEFAULT_HEIGHT: Int = 240
-        const val DEFAULT_FPS: Int    = 5   // BLE mesh ~1-2 KB/s video budget; 5fps × 850B ≈ 4.25 KB/s
-
-        // Bitrate budget.  Phones (MTU=256) practical throughput ~40-80 kbps for video.
-        // 40kbps @ 3fps → ~1667B/frame → ~10 fragments → much higher delivery probability.
-        const val DEFAULT_BITRATE_BPS: Int = 40_000
+        const val DEFAULT_WIDTH: Int  = 1280
+        const val DEFAULT_HEIGHT: Int = 720
+        const val DEFAULT_FPS: Int    = 10
+        const val DEFAULT_BITRATE_BPS: Int = 1_000_000
         const val MIN_BITRATE_BPS: Int     = 20_000
-        const val MAX_BITRATE_BPS: Int     = 200_000
+        const val MAX_BITRATE_BPS: Int     = 2_000_000
 
         // DACE complexity levels (0 = lowest CPU / fastest encode,
         // higher values trade CPU for quality — maps to dace_complexity_level)

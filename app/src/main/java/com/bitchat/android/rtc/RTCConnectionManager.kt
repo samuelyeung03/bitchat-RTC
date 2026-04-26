@@ -494,7 +494,7 @@ class RTCConnectionManager(
             // Force IDR on first frame and every 2 seconds so receiver can sync.
             // i_keyint_max=1500 won't fire on looping YUV (no scene changes).
             val forceKey = videoFrameCount == 0 ||
-                           (videoFrameCount % (videoFps * 2)) == 0
+                           (videoFrameCount % (videoFps * 5)) == 0  // IDR every 5s
             Log.d(TAG, "sendEncodedVideoFrame: seq=$seq forceKey=$forceKey yuv=${yuv420.size}")
             nalBytes = enc.encode(yuv420, forceKey) ?: run {
                 Log.w(TAG, "sendEncodedVideoFrame: encode returned null for seq=$seq"); return }
