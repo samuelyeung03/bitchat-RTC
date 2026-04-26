@@ -88,19 +88,22 @@ class BluetoothPacketBroadcaster(
 
     private fun getOrCreateVideoQueue(
         deviceAddress: String,
-        gattServer: android.bluetooth.BluetoothGattServer?,
-        characteristic: android.bluetooth.BluetoothGattCharacteristic?,
         targetPeerID: String
     ): kotlinx.coroutines.channels.Channel<ByteArray> {
         return videoFragQueues.getOrPut(deviceAddress) {
             val ch = kotlinx.coroutines.channels.Channel<ByteArray>(VIDEO_FRAG_QUEUE_CAPACITY)
-            val awaiter = clientWriteAwaiter
             videoFragDrainJobs[deviceAddress] = connectionScope.launch {
                 for (fragData in ch) {
-                    if (awaiter != null) {
-                        try { awaiter(deviceAddress) } catch (_: Exception) {}
+                    // Read awaiter dynamically — it may be null at queue creation time
+                    val awaiter = clientWriteAwaiter
+                    val conn = connectionTracker.getConnectedDevices().values.firstOrNull {
+                        connectionTracker.addressPeerMap[it.device.address] == targetPeerID
+                            && it.characteristic != null && it.isClient
                     }
-                    sendDataToPeer(fragData, targetPeerID, gattServer, characteristic, true)
+                    if (awaiter != null && conn != null) {
+                        try { awaiter(conn.device.address) } catch (_: Exception) {}
+                    }
+                    sendDataToPeer(fragData, targetPeerID, null, null, true)
                 }
             }
             ch
@@ -312,8 +315,7 @@ class BluetoothPacketBroadcaster(
                         // Video: enqueue all fragments into the bounded per-peer queue.
                         // The drain coroutine sends them one at a time through the semaphore.
                         // If the queue is full, drop this fragment (oldest frames already queued).
-                        val queue = getOrCreateVideoQueue(
-                            clientConn.device.address, gattServer, characteristic, targetPeerID)
+                        val queue = getOrCreateVideoQueue(clientConn.device.address, targetPeerID)
                         fragments.forEach { frag ->
                             val fragData = frag.toBinaryData() ?: return@forEach
                             val offered = queue.trySend(fragData).isSuccess
