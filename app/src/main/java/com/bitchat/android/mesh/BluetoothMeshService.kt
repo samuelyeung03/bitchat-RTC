@@ -541,6 +541,11 @@ class BluetoothMeshService(private val context: Context) {
                                 // Mark as directly connected (upgrades from routed if needed)
                                 try { peerManager.setDirectConnection(pid, true) } catch (_: Exception) {}
 
+                                // Stop scanning once we have a peer — prevents the second
+                                // bidirectional connection that splits BLE bandwidth in half.
+                                connectionManager.stopScan()
+                                Log.i(TAG, "Stopped scanning after first peer connected ($pid)")
+
                                 // Initial sync for this newly direct peer
                                 try { gossipSyncManager.scheduleInitialSyncToPeer(pid, 1_000) } catch (_: Exception) {}
                             }

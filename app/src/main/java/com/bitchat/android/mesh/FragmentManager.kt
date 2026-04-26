@@ -173,7 +173,7 @@ class FragmentManager {
             // iOS: incomingFragments[fragmentID]?[index] = Data(fragmentData)
             incomingFragments[fragmentIDString]?.put(fragmentPayload.index, fragmentPayload.data)
             if (fragmentPayload.originalType == MessageType.VIDEO.value) {
-                Log.i("BLE_FRAG", "FRAG_RECV idx=${fragmentPayload.index} total=${fragmentPayload.total}")
+                Log.i("BLE_FRAG", "FRAG_RECV fid=${fragmentIDString} idx=${fragmentPayload.index} total=${fragmentPayload.total}")
             }
             if (fragmentPayload.index == 0){
                 debugManager?.measureBitrate(0,0)
@@ -184,7 +184,7 @@ class FragmentManager {
             if (fragmentMap != null && fragmentMap.size == fragmentPayload.total) {
                 debugManager?.measureBitrate(1,fragmentMap.size)
                 if (fragmentPayload.originalType == MessageType.VIDEO.value) {
-                    Log.i("BLE_FRAG", "FRAG_DONE total=${fragmentPayload.total}")
+                    Log.i("BLE_FRAG", "FRAG_DONE fid=${fragmentIDString} total=${fragmentPayload.total}")
                 }
                 Log.d(TAG, "All fragments received for $fragmentIDString, reassembling...")
                 

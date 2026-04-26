@@ -115,6 +115,37 @@ def bring_to_foreground(serial):
     wake_screen(serial)
 
 
+def get_ble_mac(serial, peer_id, retries=3):
+    """Get the BLE MAC address of a connected peer from addressPeerMap log (INFO level)."""
+    for _ in range(retries):
+        try:
+            out = adb(serial, "shell", "logcat", "-d", timeout=3)
+            # "Mapped device XX:XX:XX:XX:XX:XX to peer <peer_id>"
+            if peer_id:
+                m = re.search(rf'Mapped device ([0-9A-Fa-f:{{17}}]) to peer {peer_id}', out)
+                if m:
+                    return m.group(1)
+            # Fallback: any recent "Adding device connection for" at any log level
+            macs = re.findall(r'Adding device connection for ([0-9A-Fa-f:]{17})', out)
+            if macs:
+                return macs[-1]
+        except Exception:
+            pass
+        time.sleep(1)
+    return None
+
+
+def prevent_duplicate_connections(sender, receiver, receiver_ble_addr=None, sender_ble_addr=None):
+    """Pin each device to the other's BLE MAC to prevent duplicate bidirectional connections."""
+    if receiver_ble_addr:
+        broadcast(sender, cmd="connect_to", addr=receiver_ble_addr)
+        time.sleep(0.5)
+    if sender_ble_addr:
+        broadcast(receiver, cmd="connect_to", addr=sender_ble_addr)
+        time.sleep(0.5)
+    time.sleep(3)  # let pinned connection settle
+
+
 def grant_bt_permissions(serial):
     perms = [
         "BLUETOOTH_ADVERTISE", "BLUETOOTH_CONNECT", "BLUETOOTH_SCAN",
@@ -211,8 +242,8 @@ RECV_FAIL_RE = re.compile(r"RECV_FAIL seq=(\d+) nal_b=(\d+) ts_us=(\d+)")
 TPUT_RECV_RE = re.compile(r"RECV_TPUT nal_b=(\d+) ts_us=(\d+)")
 BLE_TPUT_RE  = re.compile(r"kbps=([\d.]+)")
 FRAG_SEND_RE = re.compile(r"FRAG_SEND total=(\d+) size=(\d+)")
-FRAG_RECV_RE = re.compile(r"FRAG_RECV idx=(\d+) total=(\d+)")
-FRAG_DONE_RE = re.compile(r"FRAG_DONE total=(\d+)")
+FRAG_RECV_RE = re.compile(r"FRAG_RECV fid=([0-9a-f]+) idx=(\d+) total=(\d+)")
+FRAG_DONE_RE = re.compile(r"FRAG_DONE fid=([0-9a-f]+) total=(\d+)")
 DUP_CONN_RE  = re.compile(
     r"Dropping duplicate connection to peer|already connected via another address|"
     r"Blocking .*duplicate peer"
@@ -283,13 +314,26 @@ def parse_tput_recv(logcat_text):
 
 
 def parse_frag_stats(sender_log, receiver_log):
-    frags_sent      = sum(int(m.group(1)) for m in FRAG_SEND_RE.finditer(sender_log))
-    frags_recv_raw  = len(FRAG_RECV_RE.findall(receiver_log))
-    frames_done_raw = len(FRAG_DONE_RE.findall(receiver_log))
-    dup_factor = max(1, round(frags_recv_raw / frags_sent)) if frags_sent > 0 else 1
-    frags_recv  = frags_recv_raw  // dup_factor
-    frames_done = frames_done_raw // dup_factor
-    return frags_sent, frags_recv, frames_done, dup_factor
+    frags_sent = sum(int(m.group(1)) for m in FRAG_SEND_RE.finditer(sender_log))
+
+    # Use fid (fragment ID) to deduplicate — each frame has a unique 8-byte fid.
+    # With dual GATT connections each fragment arrives multiple times with the same fid+idx.
+    # Count unique (fid, idx) pairs = actual unique fragments received.
+    recv_pairs = set()
+    for m in FRAG_RECV_RE.finditer(receiver_log):
+        fid, idx, total = m.group(1), int(m.group(2)), int(m.group(3))
+        recv_pairs.add((fid, idx))
+    frags_recv_unique = len(recv_pairs)
+
+    # Count unique fids in FRAG_DONE = complete frames reassembled
+    done_fids = set(m.group(1) for m in FRAG_DONE_RE.finditer(receiver_log))
+    frames_done = len(done_fids)
+
+    # dup_factor for other metrics (rcv_kbps etc.)
+    frags_recv_raw = sum(1 for _ in FRAG_RECV_RE.finditer(receiver_log))
+    dup_factor = max(1, round(frags_recv_raw / frags_recv_unique)) if frags_recv_unique > 0 else 1
+
+    return frags_sent, frags_recv_unique, frames_done, dup_factor
 
 
 def encoded_bitrate_kbps(send_rows):
@@ -587,6 +631,8 @@ def run_pass(sender, receiver, receiver_peer, cl, fps, bitrate, duration, src, w
         raise LogAbnormalError(
             f"duplicate BLE connections detected ({dup_events} events); discarding pass"
         )
+    if dup_factor > 1:
+        print(f"  [warn] dup_factor={dup_factor} — duplicate connections detected, results may be inflated")
 
     s = summarise(send_rows, recv_rows, recv_fail_rows, tput_recv_rows,
                   ble_tput_avg / dup_factor, decode_rows, clock_offset_us,
