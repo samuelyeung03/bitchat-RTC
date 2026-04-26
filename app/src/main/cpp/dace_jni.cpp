@@ -53,8 +53,10 @@ Java_com_bitchat_android_rtc_DACEWrapper_nativeCreateEncoder(
     ctx->param.i_fps_den  = 1;
 
     // Rate control: ABR with 3-frame VBV buffer.
-    // Prevents per-frame bitrate spikes that overflow BLE fragments,
-    // while giving enough headroom for scene complexity variation.
+    // Prevents per-frame bitrate spikes that overflow BLE fragments.
+    // ble_kbps gap between DACE ON/OFF is a sender-side measurement artifact:
+    // DACE ON's longer encode time creates natural inter-frame pacing that smooths
+    // the throughput window. rcv_kbps (receiver-side) shows both modes deliver ~same rate.
     ctx->param.rc.i_rc_method       = X264_RC_ABR;
     ctx->param.rc.i_bitrate         = bitrate / 1000;
     ctx->param.rc.i_vbv_max_bitrate = bitrate / 1000;
