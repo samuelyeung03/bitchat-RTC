@@ -316,12 +316,14 @@ class SecurityManager(private val encryptionService: EncryptionService, private 
     private fun cleanupOldData() {
         val cutoffTime = System.currentTimeMillis() - MESSAGE_TIMEOUT
         var removedCount = 0
-        
-        // Clean up old message timestamps and corresponding processed messages
-        val messagesToRemove = messageTimestamps.entries.filter { (_, timestamp) ->
-            timestamp < cutoffTime
-        }.map { it.key }
-        
+
+        // synchronizedMap requires explicit lock during iteration
+        val messagesToRemove = synchronized(messageTimestamps) {
+            messageTimestamps.entries.filter { (_, timestamp) ->
+                timestamp < cutoffTime
+            }.map { it.key }
+        }
+
         messagesToRemove.forEach { messageId ->
             messageTimestamps.remove(messageId)
             if (processedMessages.remove(messageId)) {

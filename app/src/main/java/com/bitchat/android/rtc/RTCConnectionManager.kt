@@ -78,6 +78,7 @@ class RTCConnectionManager(
     private var videoCaptureJob: Job? = null
     private var videoSeqNumber: Int = 0
     private var videoFrameCount: Int = 0
+    private var videoFps: Int = AppConstants.Dace.DEFAULT_FPS
     private var bypassEncode = false
     private var tputPayloadSize = 0
 
@@ -380,6 +381,7 @@ class RTCConnectionManager(
         bypassEncode: Boolean = false,
     ) {
         val useFileSource = !sourcePath.isNullOrBlank()
+        videoFps = fps
 
         if (!useFileSource) {
             if (context == null) {
@@ -489,7 +491,10 @@ class RTCConnectionManager(
             cl = 0; psnr = 0.0; ssim = 0.0; encUs = 0L
         } else {
             val enc = videoEncoder ?: run { Log.w(TAG, "sendEncodedVideoFrame: no encoder"); return }
-            val forceKey = false  // x264 handles IDR via i_keyint_max=1500 (scene change detection)
+            // Force IDR on first frame and every 2 seconds so receiver can sync.
+            // i_keyint_max=1500 won't fire on looping YUV (no scene changes).
+            val forceKey = videoFrameCount == 0 ||
+                           (videoFrameCount % (videoFps * 2)) == 0
             Log.d(TAG, "sendEncodedVideoFrame: seq=$seq forceKey=$forceKey yuv=${yuv420.size}")
             nalBytes = enc.encode(yuv420, forceKey) ?: run {
                 Log.w(TAG, "sendEncodedVideoFrame: encode returned null for seq=$seq"); return }

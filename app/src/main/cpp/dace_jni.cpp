@@ -78,7 +78,7 @@ Java_com_bitchat_android_rtc_DACEWrapper_nativeCreateEncoder(
     // complexityLevel == 0   → DACE OFF (param.dace=0, superfast preset settings)
     // complexityLevel == -1  → DACE ON, auto
     // complexityLevel >= 1   → DACE ON, fixed level
-    ctx->param.i_threads = 0;  // 0 = auto (matches libtest reference which uses 12)
+    ctx->param.i_threads = 0;  // 0 = auto, matches libtest reference
     if (complexityLevel == 0) {
         ctx->param.dace = 0;  // DACE OFF: plain x264 with superfast preset analysis
     } else {
@@ -167,9 +167,10 @@ Java_com_bitchat_android_rtc_DACEWrapper_nativeEncodeFrame(
         ctx->last_encode_us       = (int64_t)(t1.tv_sec  - t0.tv_sec)  * 1000000LL
                                   + (int64_t)(t1.tv_nsec - t0.tv_nsec) / 1000LL;
         ctx->last_dace_complexity = (int)picOut.prop.DACE_complexity;
-        LOGI("frame encoded: dace_complexity=%d enc_time=%d enc_us=%lld",
+        LOGI("frame encoded: dace_complexity=%d enc_time=%d enc_us=%lld is_idr=%d",
              ctx->last_dace_complexity, picOut.prop.DACE_encoding_time,
-             (long long)ctx->last_encode_us);
+             (long long)ctx->last_encode_us,
+             (picOut.i_type == X264_TYPE_IDR) ? 1 : 0);
     }
 
     if (frameSize < 0) {
