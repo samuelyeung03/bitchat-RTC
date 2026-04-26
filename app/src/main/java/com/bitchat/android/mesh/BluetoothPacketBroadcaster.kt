@@ -74,6 +74,43 @@ class BluetoothPacketBroadcaster(
     fun setServerNotifyAwaiter(awaiter: suspend (deviceAddress: String) -> Unit) {
         serverNotifyAwaiter = awaiter
     }
+
+    // Per-peer bounded fragment send queue.
+    // All video fragments are enqueued here; a single drain coroutine sends them
+    // one at a time through the semaphore. Buffer = 200 fragments (~7 frames at
+    // 26 frags/frame). When full, the oldest fragment is dropped so the queue
+    // never grows unbounded and new frames always have room.
+    private val videoFragQueues = java.util.concurrent.ConcurrentHashMap<String,
+        kotlinx.coroutines.channels.Channel<ByteArray>>()
+    private val videoFragDrainJobs = java.util.concurrent.ConcurrentHashMap<String,
+        kotlinx.coroutines.Job>()
+    private val VIDEO_FRAG_QUEUE_CAPACITY = 200
+
+    private fun getOrCreateVideoQueue(
+        deviceAddress: String,
+        gattServer: android.bluetooth.BluetoothGattServer?,
+        characteristic: android.bluetooth.BluetoothGattCharacteristic?,
+        targetPeerID: String
+    ): kotlinx.coroutines.channels.Channel<ByteArray> {
+        return videoFragQueues.getOrPut(deviceAddress) {
+            val ch = kotlinx.coroutines.channels.Channel<ByteArray>(VIDEO_FRAG_QUEUE_CAPACITY)
+            val awaiter = clientWriteAwaiter
+            videoFragDrainJobs[deviceAddress] = connectionScope.launch {
+                for (fragData in ch) {
+                    if (awaiter != null) {
+                        try { awaiter(deviceAddress) } catch (_: Exception) {}
+                    }
+                    sendDataToPeer(fragData, targetPeerID, gattServer, characteristic, true)
+                }
+            }
+            ch
+        }
+    }
+
+    fun clearVideoQueue(deviceAddress: String) {
+        videoFragQueues.remove(deviceAddress)?.close()
+        videoFragDrainJobs.remove(deviceAddress)?.cancel()
+    }
     
     /**
      * Debug logging helper - can be easily removed/disabled for production
@@ -270,20 +307,34 @@ class BluetoothPacketBroadcaster(
                     if (transferId != null) TransferProgressManager.start(transferId, fragments.size)
                     var sent = 0
                     val awaiter = clientWriteAwaiter
-                    fragments.forEach { frag ->
-                        if (!isActive) return@launch
-                        val fragData = frag.toBinaryData() ?: return@forEach
-                        // Gate on write callback when path is client-write + awaiter is set.
-                        // This matches the same flow-control used in broadcastPacket.
-                        if (awaiter != null && clientConn != null) {
-                            try { awaiter(clientConn.device.address) } catch (_: Exception) {}
+
+                    if (isVideo && clientConn != null) {
+                        // Video: enqueue all fragments into the bounded per-peer queue.
+                        // The drain coroutine sends them one at a time through the semaphore.
+                        // If the queue is full, drop this fragment (oldest frames already queued).
+                        val queue = getOrCreateVideoQueue(
+                            clientConn.device.address, gattServer, characteristic, targetPeerID)
+                        fragments.forEach { frag ->
+                            val fragData = frag.toBinaryData() ?: return@forEach
+                            val offered = queue.trySend(fragData).isSuccess
+                            if (!offered) {
+                                Log.w(TAG, "Video frag queue full for $targetPeerID — dropping fragment")
+                            }
                         }
-                        sendDataToPeer(fragData, targetPeerID, gattServer, characteristic, isVideo)
-                        if (!isVideo) delay(20L)
-                        if (transferId != null) {
-                            sent++
-                            TransferProgressManager.progress(transferId, sent, fragments.size)
-                            if (sent == fragments.size) TransferProgressManager.complete(transferId, fragments.size)
+                    } else {
+                        // Non-video: send directly with per-fragment semaphore (existing path)
+                        fragments.forEach { frag ->
+                            if (!isActive) return@launch
+                            val fragData = frag.toBinaryData() ?: return@forEach
+                            if (awaiter != null && clientConn != null) {
+                                try { awaiter(clientConn.device.address) } catch (_: Exception) {}
+                            }
+                            sendDataToPeer(fragData, targetPeerID, gattServer, characteristic, isVideo)
+                            if (transferId != null) {
+                                sent++
+                                TransferProgressManager.progress(transferId, sent, fragments.size)
+                                if (sent == fragments.size) TransferProgressManager.complete(transferId, fragments.size)
+                            }
                         }
                     }
                 }
