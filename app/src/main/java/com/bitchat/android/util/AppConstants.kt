@@ -153,7 +153,7 @@ object AppConstants {
         const val DEFAULT_WIDTH: Int  = 1280
         const val DEFAULT_HEIGHT: Int = 720
         const val DEFAULT_FPS: Int    = 10
-        const val DEFAULT_BITRATE_BPS: Int = 1_000_000
+        const val DEFAULT_BITRATE_BPS: Int = 800_000
         const val MIN_BITRATE_BPS: Int     = 20_000
         const val MAX_BITRATE_BPS: Int     = 2_000_000
 
