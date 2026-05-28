@@ -96,9 +96,9 @@ def plot_ble_tput_summary():
     labels = ["Default BLE", "Optimized BLE\n(MTU=517, 2M PHY, WNR)"]
     vals   = [base_ceil, imp_ceil]
 
-    fig, ax = plt.subplots(figsize=(10, 5))
+    fig, ax = plt.subplots(figsize=(8, 4))
     style(ax)
-    bars = ax.bar(labels, vals, 0.45, color=[PAL[0], PAL[1]], alpha=0.9, zorder=3)
+    bars = ax.bar(labels, vals, 0.35, color=[PAL[0], PAL[1]], alpha=0.9, zorder=3)
     ax.set_ylabel("Peak Sustained Throughput (kbps)", fontsize=FS_LBL)
     ax.set_ylim(0, max(vals) * 1.2)
     ax.annotate(f"×{imp_ceil/base_ceil:.1f}", xy=(1, imp_ceil / 2),
@@ -110,22 +110,26 @@ def plot_ble_tput_summary():
     save(fig, "ble_tput_summary")
 
 
-# ── Figure B: Delivery — DACE OFF only, backpressure vs blind-send ─────────────
+# ── Figure B: Delivery — 3-bar: Blind Send, Semaphore (DACE OFF), Semaphore + DACE ON ──
 
 def plot_delivery_dace_off():
-    labels = ["Backpressure\n(Semaphore)", "Blind Send\n(no flow ctrl)"]
-    vals   = [88.4, 15.5]
-    errs   = [7.0,  4.5]
+    # 480p 15fps 800kbps (ble_480p_15fps_800k_v2)
+    # Blind-send from paper_blind test (480p 15fps 1000kbps) — no 800k blind data
+    labels = ["Blind Send\n(no flow ctrl)", "Semaphore", "Semaphore\n+ DACE"]
+    vals   = [28.2,  84.2,  88.5]
+    errs   = [ 5.0,   4.0,   3.5]
+    colors = [PAL[0], PAL[2], PAL[1]]
 
-    fig, ax = plt.subplots(figsize=(10, 5))
+    fig, ax = plt.subplots(figsize=(8, 4))
     style(ax)
-    ax.bar(labels, vals, 0.45, color=[PAL[1], PAL[0]], alpha=0.9, zorder=3,
+    ax.bar(labels, vals, 0.5, color=colors, alpha=0.9, zorder=3,
            yerr=errs, error_kw={"capsize": 5, "lw": 1.5, "color": "#555"})
     ax.set_ylabel("Frame Delivery Rate (%)", fontsize=FS_LBL)
     ax.set_ylim(0, 115)
-    ax.legend(handles=[bar_legend_handle(PAL[1], "Backpressure"),
-                        bar_legend_handle(PAL[0], "Blind Send")],
-              loc="upper right", ncol=2, fontsize=FS_LEG,
+    ax.legend(handles=[bar_legend_handle(PAL[0], "Blind Send"),
+                        bar_legend_handle(PAL[2], "Semaphore"),
+                        bar_legend_handle(PAL[1], "Semaphore + DACE")],
+              loc="upper right", ncol=1, fontsize=FS_LEG,
               framealpha=0.8, facecolor="white", edgecolor="#cccccc")
     save(fig, "ble_delivery_dace_off")
 
@@ -135,23 +139,27 @@ def plot_delivery_dace_off():
 def plot_ble_dace_quality():
     on_rows  = ss_csv(load_csv(os.path.join(BLE_DATA, "ble_dace_improved_cl-1.csv")))
     off_rows = ss_csv(load_csv(os.path.join(BLE_DATA, "ble_dace_improved_cl0.csv")))
-    on_p  = [r["psnr_db"] for r in on_rows  if r["psnr_db"] > 1]
-    off_p = [r["psnr_db"] for r in off_rows if r["psnr_db"] > 1]
 
-    fig, ax = plt.subplots(figsize=(10, 5))   # 1:2 aspect
+    def to_ssim_db(rows, key="ssim"):
+        return [-10 * math.log10(1 - r[key]) for r in rows if r.get(key) and 0 < r[key] < 1]
+
+    on_s  = to_ssim_db(on_rows)
+    off_s = to_ssim_db(off_rows)
+
+    fig, ax = plt.subplots(figsize=(8, 4))
     style(ax)
-    ax.plot(range(len(off_p)), off_p, color=PAL[0], lw=LW, label=f"DACE OFF  avg={np.mean(off_p):.2f} dB")
-    ax.plot(range(len(on_p)),  on_p,  color=PAL[1], lw=LW, label=f"DACE ON   avg={np.mean(on_p):.2f} dB")
-    delta = np.mean(on_p) - np.mean(off_p)
-    mid_x = min(len(on_p), len(off_p)) // 2
-    mid_y = (np.mean(on_p) + np.mean(off_p)) / 2
+    ax.plot(range(len(off_s)), off_s, color=PAL[0], lw=LW, label=f"DACE OFF  avg={np.mean(off_s):.2f} dB")
+    ax.plot(range(len(on_s)),  on_s,  color=PAL[1], lw=LW, label=f"DACE ON   avg={np.mean(on_s):.2f} dB")
+    delta = np.mean(on_s) - np.mean(off_s)
+    mid_x = min(len(on_s), len(off_s)) // 2
+    mid_y = (np.mean(on_s) + np.mean(off_s)) / 2
     ax.annotate(f"Δ = {delta:+.2f} dB", xy=(mid_x, mid_y), fontsize=FS_LBL,
                 ha="center", va="center",
                 bbox=dict(boxstyle="round,pad=0.3", fc="#ffffff99", ec="#cccccc"))
     ax.set_xlabel("Received frame index", fontsize=FS_LBL)
-    ax.set_ylabel("PSNR (dB)", fontsize=FS_LBL)
-    ax.legend(handles=[line_legend_handle(PAL[0], f"DACE OFF  avg={np.mean(off_p):.2f} dB"),
-                        line_legend_handle(PAL[1], f"DACE ON   avg={np.mean(on_p):.2f} dB")],
+    ax.set_ylabel("SSIM (dB)", fontsize=FS_LBL)
+    ax.legend(handles=[line_legend_handle(PAL[0], f"DACE OFF  avg={np.mean(off_s):.2f} dB"),
+                        line_legend_handle(PAL[1], f"DACE ON   avg={np.mean(on_s):.2f} dB")],
               loc="upper right", ncol=2, fontsize=FS_LEG,
               framealpha=0.8, facecolor="white", edgecolor="#cccccc")
     save(fig, "ble_dace_quality")
@@ -169,7 +177,7 @@ def plot_local_ssim_vs_cl():
         encs.append(statistics.mean(d["durations"]) / 1000)
 
     x = np.arange(len(cls))
-    fig, ax1 = plt.subplots(figsize=(10, 5))   # 1:2 aspect
+    fig, ax1 = plt.subplots(figsize=(8, 4))   # 1:2 aspect
     style(ax1); ax2 = twin(ax1)
     ax1.bar(x, ssims, 0.55, color=PAL[1], alpha=0.9, zorder=3)
     ax2.plot(x, encs, "o-", color=PAL[0], lw=LW, ms=5, zorder=4)
@@ -198,7 +206,7 @@ def plot_pi_enc_time():
         on_enc.append(statistics.mean(d_on["durations"]) / 1000)
         off_enc.append(statistics.mean(d_off["durations"]) / 1000)
 
-    fig, ax = plt.subplots(figsize=(10, 5))   # 1:2 aspect
+    fig, ax = plt.subplots(figsize=(8, 4))   # 1:2 aspect
     style(ax)
     ax.plot(bitrates, off_enc, "o-",  color=PAL[0], lw=LW, ms=5, label="DACE OFF (superfast)")
     ax.plot(bitrates, on_enc,  "s--", color=PAL[1], lw=LW, ms=5, label="DACE ON (auto)")
@@ -236,21 +244,27 @@ def plot_pi_ssim():
                   loc="upper right", ncol=1, fontsize=FS_LEG,
                   framealpha=0.8, facecolor="white", edgecolor="#cccccc")
 
-    # Graph 1: SSIM (linear)
-    fig, ax = plt.subplots(figsize=(10, 5))
+    def to_db(vals):
+        return [-10 * math.log10(1 - v) for v in vals]
+
+    on_ssim_db  = to_db(on_ssim)
+    off_ssim_db = to_db(off_ssim)
+
+    # Graph 1: SSIM in dB
+    fig, ax = plt.subplots(figsize=(8, 4))
     style(ax)
-    ax.plot(bitrates, off_ssim, "o-",  color=PAL[0], lw=LW, ms=5)
-    ax.plot(bitrates, on_ssim,  "s--", color=PAL[1], lw=LW, ms=5)
+    ax.plot(bitrates, off_ssim_db, "o-",  color=PAL[0], lw=LW, ms=5)
+    ax.plot(bitrates, on_ssim_db,  "s--", color=PAL[1], lw=LW, ms=5)
     ax.set_xlabel("Target Bitrate (kbps)", fontsize=FS_LBL)
-    ax.set_ylabel("SSIM", fontsize=FS_LBL)
-    _legend(ax, f"DACE OFF  avg={statistics.mean(off_ssim):.3f}",
-                f"DACE ON   avg={statistics.mean(on_ssim):.3f}")
+    ax.set_ylabel("SSIM (dB)", fontsize=FS_LBL)
+    _legend(ax, f"DACE OFF  avg={statistics.mean(off_ssim_db):.2f} dB",
+                f"DACE ON   avg={statistics.mean(on_ssim_db):.2f} dB")
     save(fig, "pi_dace_ssim_bitrate")
 
     # Graph 2: SSIM in dB = -10*log10(1-SSIM)
     on_ssim_db  = [-10 * math.log10(1 - v) for v in on_ssim]
     off_ssim_db = [-10 * math.log10(1 - v) for v in off_ssim]
-    fig, ax = plt.subplots(figsize=(10, 5))
+    fig, ax = plt.subplots(figsize=(8, 4))
     style(ax)
     ax.plot(bitrates, off_ssim_db, "o-",  color=PAL[0], lw=LW, ms=5)
     ax.plot(bitrates, on_ssim_db,  "s--", color=PAL[1], lw=LW, ms=5)
@@ -261,7 +275,7 @@ def plot_pi_ssim():
     save(fig, "pi_dace_ssim_bitrate_log")
 
     # Graph 3: PSNR (dB, linear axis — already log domain)
-    fig, ax = plt.subplots(figsize=(10, 5))
+    fig, ax = plt.subplots(figsize=(8, 4))
     style(ax)
     ax.plot(bitrates, off_psnr, "o-",  color=PAL[0], lw=LW, ms=5)
     ax.plot(bitrates, on_psnr,  "s--", color=PAL[1], lw=LW, ms=5)

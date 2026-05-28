@@ -85,6 +85,7 @@ class YuvFileInputDevice(
                 }
 
                 val frame = ByteArray(frameSize)
+                val t0 = System.nanoTime()
                 val ok = readExactly(input, frame)
                 if (!ok) {
                     input.close()
@@ -92,7 +93,6 @@ class YuvFileInputDevice(
                     continue
                 }
 
-                val t0 = System.nanoTime()
                 onFrame(frame)
 
                 val elapsed = System.nanoTime() - t0

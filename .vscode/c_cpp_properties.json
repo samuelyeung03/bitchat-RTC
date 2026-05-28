@@ -15,7 +15,7 @@
         "__aarch64__"
       ],
       "compilerPath": "${env:HOME}/Android/Sdk/ndk/27.2.12479018/toolchains/llvm/prebuilt/linux-x86_64/bin/aarch64-linux-android26-clang",
-      "cStandard": "c11",
+      "cStandard": "c11", 
       "cppStandard": "c++17",
       "intelliSenseMode": "clang-arm64"
     }
